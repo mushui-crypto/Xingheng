@@ -375,6 +375,22 @@ test("queries map OKX order states and preserve UNKNOWN reason", async () => {
   }
 });
 
+test("normalizes OKX USDT fee charges and rebates into signed net cost", async () => {
+  const client = new FakeOkxExecutionClient();
+  const service = new OkxIntentExecutionService(client, serviceOptions());
+  const lookup = {
+    instrumentId: "DOGE-USDT-PERP",
+    instId: "DOGE-USDT-SWAP",
+    ordId: "7001",
+    clOrdId: "sxokxidentity000000000000000000",
+  };
+
+  client.orderOverride = { fee: "-0.001", feeCcy: "USDT" };
+  assert.equal((await service.query(lookup)).observation.accountingEvidence?.tradingFeeNetCostUsdt, "0.001");
+  client.orderOverride = { fee: "0.002", feeCcy: "USDT" };
+  assert.equal((await service.query(lookup)).observation.accountingEvidence?.tradingFeeNetCostUsdt, "-0.002");
+});
+
 test("converts accFillSz=7 contracts to canonical filledBaseQuantity=70 when ctVal=10", async () => {
   const client = new FakeOkxExecutionClient();
   client.filledQuantityOverride = "7";

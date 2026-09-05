@@ -863,29 +863,43 @@ export function derivePositionHealth(
 
 function RevenueDetails({ presentation }: { presentation?: ArbitragePositionPresentation }) {
   const revenue = presentation?.revenue;
-  const expectedNetProfit = revenue?.expectedArbitrageNetProfit ?? null;
-  const values = revenue ? [expectedNetProfit, revenue.cumulativeFundingIncome, revenue.incurredFees, revenue.estimatedExitFees, revenue.exitSpreadProfit] : [];
-  const hasReliableValue = revenue?.completeness === "COMPLETE" && values.some((value) => value !== null);
+  const hasReliableValue = revenue !== undefined && (
+    revenue.cumulativeFundingIncomeCompleteness === "COMPLETE"
+    || revenue.incurredFeesCompleteness === "COMPLETE"
+    || revenue.realizedSpreadProfitCompleteness === "COMPLETE"
+    || revenue.realizedNetProfitCompleteness === "COMPLETE"
+  );
   if (!hasReliableValue) return <section className="flex items-center justify-between gap-3 px-[18px] py-4">
     <h5 className="text-[13px] font-bold leading-none text-[#b7bfca]">收益明细</h5>
     <p className="text-[11px] text-[#798493]">暂无可靠收益数据</p>
   </section>;
   return <section className="px-[18px] py-4">
     <h5 className="text-[13px] font-bold leading-none text-[#b7bfca]">收益明细</h5>
-    <dl className="mt-3 grid grid-cols-1 gap-[10px] sm:grid-cols-2 lg:grid-cols-5">
-      <RevenueMetric label="预计套利净收益" tone="profit" value={expectedNetProfit ?? "暂无可靠数据"} />
-      <RevenueMetric label="累计资金费收入" value={revenue.cumulativeFundingIncome ?? "暂无可靠数据"} />
-      <RevenueMetric label="已发生手续费" tone="cost" value={revenue.incurredFees ?? "暂无可靠数据"} />
-      <RevenueMetric label="预计退出手续费" tone="cost" value={revenue.estimatedExitFees ?? "暂无可靠数据"} />
-      <RevenueMetric label="退出价差收益" value={revenue.exitSpreadProfit ?? "暂无可靠数据"} />
+    <dl className="mt-3 grid grid-cols-1 gap-[10px] sm:grid-cols-2 lg:grid-cols-4">
+      <RevenueMetric label="累计资金费收入" value={revenueValue(revenue.cumulativeFundingIncome, revenue.cumulativeFundingIncomeCompleteness)} />
+      <RevenueMetric label="已发生手续费" tone="cost" value={feeRevenueValue(revenue.incurredFees, revenue.incurredFeesCompleteness)} />
+      <RevenueMetric label="已实现价差收益" value={revenueValue(revenue.realizedSpreadProfit, revenue.realizedSpreadProfitCompleteness)} />
+      <RevenueMetric label="已实现净收益" tone="profit" value={revenueValue(revenue.realizedNetProfit, revenue.realizedNetProfitCompleteness)} />
     </dl>
   </section>;
 }
 
 function RevenueMetric({ label, tone = "neutral", value }: { label: string; tone?: "neutral" | "profit" | "cost"; value: string }) {
-  const valueClass = value === "暂无可靠数据" ? "text-[#798493]" : tone === "profit" ? "text-[#22c55e]" : tone === "cost" ? "text-[#f87171]" : "text-[#f3f5f8]";
-  const displayValue = tone === "cost" && value !== "暂无可靠数据" && Number(value) > 0 ? `-${value}` : value;
-  return <div className="min-w-0 rounded-md bg-[#0c0e11] p-4"><dt className="text-[11px] leading-none text-[#798493]">{label}</dt><dd className={`mt-[7px] break-words font-mono text-[17px] font-medium leading-5 ${valueClass}`}>{displayValue}</dd></div>;
+  const valueClass = value === "暂无可靠数据" ? "text-[#798493]" : value.endsWith(" rebate") || tone === "profit" ? "text-[#22c55e]" : tone === "cost" ? "text-[#f87171]" : "text-[#f3f5f8]";
+  return <div className="min-w-0 rounded-md bg-[#0c0e11] p-4"><dt className="text-[11px] leading-none text-[#798493]">{label}</dt><dd className={`mt-[7px] break-words font-mono text-[17px] font-medium leading-5 ${valueClass}`}>{value}</dd></div>;
+}
+
+function revenueValue(value: string | null, completeness: "COMPLETE" | "INCOMPLETE") {
+  if (completeness !== "COMPLETE" || value === null) return "暂无可靠数据";
+  return `${value.startsWith("-") || value === "0" ? "" : "+"}${value} USDT`;
+}
+
+function feeRevenueValue(value: string | null, completeness: "COMPLETE" | "INCOMPLETE") {
+  if (completeness !== "COMPLETE" || value === null) return "暂无可靠数据";
+  if (value === "0") return "0 USDT";
+  return value.startsWith("-")
+    ? `+${value.slice(1)} USDT rebate`
+    : `-${value} USDT`;
 }
 
 function fundingRatePresentation(presentation?: ArbitragePositionPresentation) {

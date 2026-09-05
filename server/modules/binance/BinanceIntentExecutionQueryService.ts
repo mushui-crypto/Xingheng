@@ -12,6 +12,7 @@ import type { BinancePersonalTradingService } from "./BinancePersonalTradingServ
 import { binanceFilledBaseQuantity } from "./BinanceTypes";
 import { binanceExecutionIdempotencyKeyFor } from "./BinanceIntentExecutionService";
 import { assertBinanceProviderOrderIdentity } from "./BinanceProviderOrderIdentity";
+import { createExecutionAccountingEvidence } from "../cex/ExecutionAccountingEvidence";
 
 export type BinanceIntentExecutionQueryServiceBinding = Pick<
   BinancePersonalTradingService,
@@ -87,11 +88,29 @@ export function binanceExecutionObservationForOrder(
   order: NonNullable<BinanceStoredOrder["order"]>,
   observedAt: number,
 ): ExecutionQueryObservation {
+  const filledBaseQuantity = binanceFilledBaseQuantity(order);
+  const averageFillPrice = positiveNumberDecimal(order.averagePrice);
   return createExecutionQueryObservation({
     state: stateForOrder(order),
-    filledBaseQuantity: binanceFilledBaseQuantity(order),
+    filledBaseQuantity,
     observedAt,
+    accountingEvidence: createExecutionAccountingEvidence({
+      providerOrderId: order.orderId,
+      filledQuantity: filledBaseQuantity,
+      averageFillPrice,
+      feeAmountProvider: null,
+      feeAsset: null,
+      tradingFeeNetCostUsdt: null,
+      confirmedAt: observedAt,
+      completeness: "INCOMPLETE",
+    }),
   });
+}
+
+function positiveNumberDecimal(value: number | null) {
+  if (value === null || !Number.isFinite(value) || value <= 0) return null;
+  const text = String(value);
+  return /^(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(text) ? text : null;
 }
 
 function stateForOrder(order: NonNullable<BinanceStoredOrder["order"]>): ExecutionQueryObservation["state"] {

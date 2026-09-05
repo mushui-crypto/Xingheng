@@ -494,6 +494,9 @@ export class ArbitrageExecutionCommandService {
         ...(runtimeResult.mutationDisposition === "NOT_DISPATCHED"
           ? { mutationDisposition: runtimeResult.mutationDisposition }
           : {}),
+        ...(runtimeResult.accountingEvidence === undefined
+          ? {}
+          : { accountingEvidence: runtimeResult.accountingEvidence }),
         updatedAt: runtimeResult.executionRecord.updatedAt,
       }));
       if (currentHedgeStartTimingLeg() === "LEG1") markHedgeStartTiming("leg1ProjectionCommitted");
@@ -627,6 +630,9 @@ export class ArbitrageExecutionCommandService {
       executionIntentId: reference.executionIntentId,
       status: attributableStatus,
       confirmedQuantity: runtimeResult.confirmedQuantity ?? reference.confirmedQuantity,
+      ...(runtimeResult.accountingEvidence === undefined
+        ? {}
+        : { accountingEvidence: runtimeResult.accountingEvidence }),
       updatedAt: runtimeResult.executionRecord.updatedAt,
     } as const;
     const updated = measureHedgeStartTimingSync("projectionCommitMs", () => historicalCorrection

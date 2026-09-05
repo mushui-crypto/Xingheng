@@ -4,6 +4,7 @@ import type { CoordinatedExecutionResult } from "../cex/ExecutionCoordinator";
 import type { ExecutionIntent } from "../cex/ExecutionIntent";
 import type { ExecutionReconciliationObservation } from "../cex/ExecutionReconciliationCapability";
 import type { ExecutionRecord } from "../cex/ExecutionRecord";
+import type { ExecutionAccountingEvidence } from "../cex/ExecutionAccountingEvidence";
 import type { VerifiedExecutionProviderIdentity } from "../cex/ExecutionMutationSafetyGuard";
 
 export type FormalExecutionDiagnostic = Readonly<{
@@ -218,6 +219,7 @@ const CONTROLLED_PROVIDER_CATEGORIES = new Set([
 export type FormalExecutionRuntimeResult = Readonly<{
   executionRecord: ExecutionRecord;
   confirmedQuantity: string | null;
+  accountingEvidence?: ExecutionAccountingEvidence;
   mutationDisposition?: FormalExecutionMutationDisposition;
   diagnostic?: FormalExecutionDiagnostic;
 }>;
@@ -259,6 +261,9 @@ export function mapFormalReconcileRuntimeResult(result: Readonly<{
     confirmedQuantity: result.observation?.state === "UNKNOWN"
       ? null
       : result.observation?.filledBaseQuantity ?? null,
+    ...(result.observation?.accountingEvidence === undefined
+      ? {}
+      : { accountingEvidence: result.observation.accountingEvidence }),
   });
 }
 

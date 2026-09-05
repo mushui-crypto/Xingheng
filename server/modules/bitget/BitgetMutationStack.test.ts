@@ -213,8 +213,13 @@ test("Bitget ACK is not confirmed; query preserves partial and canceled-with-fil
   assert.equal(queried.observation.filledBaseQuantity, "40.12345678");
   provider.orderStatus = "CONFIRMED";
   provider.filledQuantity = "95.12345678";
+  provider.fee = "0.003";
+  provider.feeCurrency = "USDT";
   queried = await service.query(lookup);
   assert.equal(queried.observation.state, "CONFIRMED");
+  assert.equal(queried.observation.accountingEvidence?.averageFillPrice, "0.085");
+  assert.equal(queried.observation.accountingEvidence?.tradingFeeNetCostUsdt, "0.003");
+  assert.equal(queried.observation.accountingEvidence?.completeness, "COMPLETE");
   provider.orderStatus = "UNKNOWN";
   queried = await service.query(lookup);
   assert.equal(queried.observation.state, "UNKNOWN");
@@ -614,6 +619,8 @@ class FakeBitgetService {
   readPositionMode?: () => Promise<"ONE_WAY" | "HEDGE">;
   orderStatus: BitgetProviderOrder["status"] = "PENDING_CONFIRMATION";
   filledQuantity = "0";
+  fee = "0";
+  feeCurrency: string | null = null;
   orderEvidenceOverride: Partial<Pick<BitgetProviderOrder, "posSide" | "tradeSide" | "holdMode" | "reduceOnly">> = {};
   placeFailure?: Error;
   private lastOrder?: BitgetPlaceOrderRequest;
@@ -633,7 +640,7 @@ class FakeBitgetService {
     const tradeSide = this.lastTradeSide;
     return { category: request.category, symbol: request.symbol, orderId: request.orderId ?? "order-1", clientOid: request.clientOid,
       side: placed.side, status: this.orderStatus, rawStatus: "fixture", requestedQuantity: placed.qty,
-      filledQuantity: this.filledQuantity, averagePrice: this.filledQuantity === "0" ? null : "0.085", fee: "0", feeCurrency: null,
+      filledQuantity: this.filledQuantity, averagePrice: this.filledQuantity === "0" ? null : "0.085", fee: this.fee, feeCurrency: this.feeCurrency,
       ...(posSide === undefined ? {} : { posSide, tradeSide, holdMode: "hedge_mode" as const }),
       ...(request.category === "USDT-FUTURES" && posSide === undefined ? {
         holdMode: "one_way_mode" as const,

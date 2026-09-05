@@ -120,12 +120,14 @@ export type ArbitragePositionPresentation = Readonly<{
     completeness: "COMPLETE" | "INCOMPLETE";
   }>;
   revenue: Readonly<{
-    expectedArbitrageNetProfit?: string | null;
     cumulativeFundingIncome: string | null;
+    cumulativeFundingIncomeCompleteness: "COMPLETE" | "INCOMPLETE";
     incurredFees: string | null;
-    estimatedExitFees: string | null;
-    exitSpreadProfit?: string | null;
-    currentArbitrageNetProfit?: string | null;
+    incurredFeesCompleteness: "COMPLETE" | "INCOMPLETE";
+    realizedSpreadProfit: string | null;
+    realizedSpreadProfitCompleteness: "COMPLETE" | "INCOMPLETE";
+    realizedNetProfit: string | null;
+    realizedNetProfitCompleteness: "COMPLETE" | "INCOMPLETE";
     completeness: "COMPLETE" | "INCOMPLETE";
   }>;
 }>;
@@ -468,14 +470,21 @@ function positionPresentation(payload: unknown): ArbitragePositionPresentation {
       completeness,
     },
     revenue: {
-      expectedArbitrageNetProfit: nullableDecimal(revenue.expectedArbitrageNetProfit),
       cumulativeFundingIncome: nullableDecimal(revenue.cumulativeFundingIncome),
+      cumulativeFundingIncomeCompleteness: completenessValue(revenue.cumulativeFundingIncomeCompleteness),
       incurredFees: nullableDecimal(revenue.incurredFees),
-      estimatedExitFees: nullableDecimal(revenue.estimatedExitFees),
-      exitSpreadProfit: nullableDecimal(revenue.exitSpreadProfit),
+      incurredFeesCompleteness: completenessValue(revenue.incurredFeesCompleteness),
+      realizedSpreadProfit: nullableDecimal(revenue.realizedSpreadProfit),
+      realizedSpreadProfitCompleteness: completenessValue(revenue.realizedSpreadProfitCompleteness),
+      realizedNetProfit: nullableDecimal(revenue.realizedNetProfit),
+      realizedNetProfitCompleteness: completenessValue(revenue.realizedNetProfitCompleteness),
       completeness: revenueCompleteness,
     },
   };
+}
+
+function completenessValue(value: unknown) {
+  return value === "COMPLETE" || value === "INCOMPLETE" ? value : invalidResponse();
 }
 
 function positionFundingLeg(payload: unknown): ArbitragePositionFundingLeg {

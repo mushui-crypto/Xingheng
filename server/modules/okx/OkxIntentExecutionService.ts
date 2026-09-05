@@ -16,6 +16,7 @@ import {
   type VerifiedManagedCloseNativeExecutionRules,
 } from "../arbitrage-execution/FormalExecutionRuntime";
 import type { ExecutionStatus } from "../cex/ExecutionState";
+import { createExecutionAccountingEvidence, negateSignedDecimal } from "../cex/ExecutionAccountingEvidence";
 import {
   ExecutionMutationSafetyGuard,
   type ExecutionMutationContext,
@@ -516,7 +517,25 @@ function observationForOrder(
     state,
     filledBaseQuantity,
     observedAt: finalObservedAt,
+    accountingEvidence: okxAccountingEvidence(order, filledBaseQuantity, finalObservedAt),
   }), statusReason: order.statusReason });
+}
+
+function okxAccountingEvidence(order: OkxProviderOrder, filledQuantity: string, confirmedAt: number) {
+  const feeAsset = order.feeCcy ?? null;
+  const netCost = order.fee === "0"
+    ? "0"
+    : feeAsset === "USDT" ? negateSignedDecimal(order.fee) : null;
+  return createExecutionAccountingEvidence({
+    providerOrderId: order.ordId,
+    filledQuantity,
+    averageFillPrice: order.averagePrice,
+    feeAmountProvider: order.fee,
+    feeAsset,
+    tradingFeeNetCostUsdt: netCost,
+    confirmedAt,
+    completeness: order.averagePrice !== null && netCost !== null ? "COMPLETE" : "INCOMPLETE",
+  });
 }
 
 function reduceOnlySemantic(lookup: OkxExecutionOrderLookup) {

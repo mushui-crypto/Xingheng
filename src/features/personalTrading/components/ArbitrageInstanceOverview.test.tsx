@@ -68,9 +68,11 @@ function presentation(arbitrageId: string): ArbitragePositionPresentation {
       marketDataAsOf: 1_800_000_000_000, completeness: "COMPLETE",
     },
     revenue: {
-      expectedArbitrageNetProfit: null,
-      cumulativeFundingIncome: null, incurredFees: null, estimatedExitFees: null,
-      exitSpreadProfit: null, completeness: "INCOMPLETE",
+      cumulativeFundingIncome: null, cumulativeFundingIncomeCompleteness: "INCOMPLETE",
+      incurredFees: null, incurredFeesCompleteness: "INCOMPLETE",
+      realizedSpreadProfit: null, realizedSpreadProfitCompleteness: "INCOMPLETE",
+      realizedNetProfit: null, realizedNetProfitCompleteness: "INCOMPLETE",
+      completeness: "INCOMPLETE",
     },
   };
 }
@@ -143,7 +145,7 @@ test("arbitrage position card follows the three-level decision hierarchy without
   assert.match(html, /仓位状态[\s\S]*健康状态[\s\S]*两腿数量差[\s\S]*差额原因[\s\S]*影响完整退出[\s\S]*数据同步状态/u);
   assert.match(html, /收益明细[\s\S]*暂无可靠收益数据/u);
   assert.doesNotMatch(html, /Spot PnL|Perp PnL|单腿浮盈亏|基差收益损失/u);
-  assert.match(source, /sm:grid-cols-2 lg:grid-cols-5/u);
+  assert.match(source, /sm:grid-cols-2 lg:grid-cols-4/u);
   assert.match(source, /const \[expanded, setExpanded\] = useState\(false\)/u);
   assert.match(source, /aria-expanded=\{expanded\}[\s\S]*setExpanded/u);
   assert.match(source, /onClick=\{\(event\) => event\.stopPropagation\(\)\}/u);
@@ -323,7 +325,7 @@ test("first-paint decoupling keeps the existing endpoint and polling request cou
   assert.equal(POSITION_PRESENTATION_REFRESH_INTERVAL_MS, 20_000);
 });
 
-test("revenue collapses when unreliable and restores the five frozen fields for reliable values", () => {
+test("revenue collapses when all values are unreliable and renders the four realized fields independently", () => {
   const [instance] = requireArbitrageInstanceList([arbitrageInstance("HOLDING")]);
   const emptyHtml = renderToStaticMarkup(<ArbitrageInstanceSections
     active={[instance!]}
@@ -335,12 +337,15 @@ test("revenue collapses when unreliable and restores the five frozen fields for 
   const populated = {
     ...presentation(instance!.arbitrageId),
     revenue: {
-      expectedArbitrageNetProfit: "1.5",
-      cumulativeFundingIncome: "0",
-      incurredFees: null,
-      estimatedExitFees: "0.25",
-      exitSpreadProfit: "1.75",
-      completeness: "COMPLETE" as const,
+      cumulativeFundingIncome: null,
+      cumulativeFundingIncomeCompleteness: "INCOMPLETE" as const,
+      incurredFees: "0.003",
+      incurredFeesCompleteness: "COMPLETE" as const,
+      realizedSpreadProfit: "0.005",
+      realizedSpreadProfitCompleteness: "COMPLETE" as const,
+      realizedNetProfit: null,
+      realizedNetProfitCompleteness: "INCOMPLETE" as const,
+      completeness: "INCOMPLETE" as const,
     },
   };
   const populatedHtml = renderToStaticMarkup(<ArbitrageInstanceSections
@@ -353,8 +358,9 @@ test("revenue collapses when unreliable and restores the five frozen fields for 
 
   assert.match(emptyHtml, /收益明细[\s\S]*暂无可靠收益数据/u);
   assert.doesNotMatch(emptyHtml, /累计资金费收入/u);
-  assert.match(populatedHtml, /预计套利净收益[\s\S]*1\.5[\s\S]*累计资金费收入[\s\S]*>0<[\s\S]*预计退出手续费[\s\S]*0\.25[\s\S]*退出价差收益[\s\S]*1\.75/u);
-  assert.match(populatedHtml, /lg:grid-cols-5/u);
+  assert.match(populatedHtml, /累计资金费收入[\s\S]*暂无可靠数据[\s\S]*已发生手续费[\s\S]*-0\.003 USDT[\s\S]*已实现价差收益[\s\S]*\+0\.005 USDT[\s\S]*已实现净收益[\s\S]*暂无可靠数据/u);
+  assert.match(populatedHtml, /lg:grid-cols-4/u);
+  assert.doesNotMatch(populatedHtml, /预计套利净收益|预计退出手续费|退出价差收益/u);
 });
 
 test("leg exit copy only describes exit capability and primary actions stay outside the expand button", () => {

@@ -185,8 +185,13 @@ test("Bybit ACK never becomes CONFIRMED and authoritative query handles partial 
 
   provider.orderStatus = "CONFIRMED";
   provider.filledQuantity = "100";
+  provider.fee = "0.004";
+  provider.feeCurrency = "USDT";
   queried = await service.query(lookup);
   assert.equal(queried.observation.state, "CONFIRMED");
+  assert.equal(queried.observation.accountingEvidence?.averageFillPrice, "0.1");
+  assert.equal(queried.observation.accountingEvidence?.tradingFeeNetCostUsdt, "0.004");
+  assert.equal(queried.observation.accountingEvidence?.completeness, "COMPLETE");
 
   provider.orderStatus = "UNKNOWN";
   queried = await service.query(lookup);
@@ -671,6 +676,8 @@ class FakeBybitRuntimeService implements BybitIntentRuntimeService {
   positionModeResult: 0 | 1 | 2 | null = 0;
   orderStatus: BybitProviderOrder["status"] = "PENDING_CONFIRMATION";
   filledQuantity = "0";
+  fee = "0";
+  feeCurrency: string | null = null;
   orderSideOverride?: "Buy" | "Sell";
   orderPositionIdxOverride?: 0 | 1 | 2;
   orderReduceOnlyOverride?: boolean;
@@ -708,8 +715,8 @@ class FakeBybitRuntimeService implements BybitIntentRuntimeService {
       requestedQuantity: placed.qty,
       filledQuantity: this.filledQuantity,
       averagePrice: this.filledQuantity === "0" ? null : "0.1",
-      fee: "0",
-      feeCurrency: null,
+      fee: this.fee,
+      feeCurrency: this.feeCurrency,
       ...(placed.positionIdx === undefined
         ? {}
         : { positionIdx: this.orderPositionIdxOverride ?? placed.positionIdx }),

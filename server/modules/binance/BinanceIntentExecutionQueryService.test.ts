@@ -86,6 +86,26 @@ test("uses the exact persisted Decimal fill instead of the legacy number bridge"
   assert.equal(observation.filledBaseQuantity, "0.123456789012345678901");
 });
 
+test("exposes authoritative Binance fill price while leaving unavailable fee facts incomplete", async () => {
+  const order = storedOrder("Filled", 0.002);
+  order.order!.averagePrice = 2_500;
+  const observation = await new BinanceIntentExecutionQueryService(
+    new FakeQueryBinding([order]),
+    () => now,
+  ).query(executionRecord());
+
+  assert.deepEqual(observation.accountingEvidence, {
+    providerOrderId: "9223372036854775807",
+    filledQuantity: "0.002",
+    averageFillPrice: "2500",
+    feeAmountProvider: null,
+    feeAsset: null,
+    tradingFeeNetCostUsdt: null,
+    confirmedAt: now,
+    completeness: "INCOMPLETE",
+  });
+});
+
 test("mismatched persisted provider identity cannot confirm or apply partial quantity", async (t) => {
   for (const [index, override] of [
     { symbol: "BTCUSDT" },

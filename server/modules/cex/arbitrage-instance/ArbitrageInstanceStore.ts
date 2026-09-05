@@ -29,6 +29,9 @@ import {
   openingSetupSourcePlanId,
   type ArbitrageOpeningSetup,
 } from "../../arbitrage-execution/ArbitrageOpeningSetup";
+import type { ExecutionAccountingFactCandidate } from "./ExecutionAccountingFact";
+import type { ExecutionAccountingFact } from "./ExecutionAccountingFact";
+import { createExecutionAccountingEvidence } from "../ExecutionAccountingEvidence";
 
 const ACTIVE_STATUSES: readonly ArbitrageInstanceStatus[] = ["OPENING", "HOLDING", "RESIDUAL", "CLOSING"];
 const HISTORY_STATUSES: readonly ArbitrageInstanceStatus[] = ["CLOSED", "FAILED"];
@@ -58,6 +61,7 @@ export type ExecutionResultUpdate = Readonly<{
   confirmedQuantity: string;
   mutationDisposition?: "NOT_DISPATCHED";
   updatedAt: number;
+  accountingEvidence?: ExecutionAccountingFactCandidate;
 }>;
 
 export type LegacyHistoricalRepair = ExecutionResultUpdate & Readonly<{
@@ -277,6 +281,28 @@ type ReferenceRow = Readonly<{
   status: string;
   createdAt: number;
   updatedAt: number;
+}>;
+
+type ExecutionAccountingFactRow = Readonly<{
+  executionRecordId: string;
+  arbitrageId: string;
+  legId: string;
+  executionIntentId: string;
+  providerOrderId: string;
+  executionPhase: string;
+  quantityEffect: string;
+  terminalExecutionStatus: string;
+  filledQuantity: string;
+  averageFillPrice: string | null;
+  feeAmountProvider: string | null;
+  feeAsset: string | null;
+  tradingFeeNetCostUsdt: string | null;
+  confirmedAt: number;
+  priceCompleteness: string;
+  feeCompleteness: string;
+  integrityStatus: string;
+  completeness: string;
+  createdAt: number;
 }>;
 
 type UnresolvedRecoveryCandidateRow = Readonly<{
@@ -1182,7 +1208,188 @@ export class ArbitrageInstanceStore {
     arbitrageId: string,
     update: ExecutionResultUpdate,
   ): ArbitrageInstance {
-    return this.applyExecutionProjection(userId, arbitrageId, update, false);
+    let projected: ArbitrageInstance;
+    try {
+      projected = this.applyExecutionProjection(userId, arbitrageId, update, false);
+    } catch (error) {
+      this.markAccountingQuantityConflict(userId, arbitrageId, update);
+      throw error;
+    }
+    this.persistExecutionAccountingEvidence(userId, arbitrageId, update, false);
+    return projected;
+  }
+
+  listExecutionAccountingFacts(userId: string, arbitrageId: string): readonly ExecutionAccountingFact[] {
+    const normalizedUserId = identifier(userId, "userId");
+    const normalizedArbitrageId = identifier(arbitrageId, "arbitrageId");
+    if (!this.get(normalizedUserId, normalizedArbitrageId)) return Object.freeze([]);
+    const rows = this.db.prepare(`SELECT fact.* FROM execution_accounting_facts fact
+      JOIN arbitrage_instances owner ON owner.arbitrageId = fact.arbitrageId
+      WHERE owner.userId = ? AND fact.arbitrageId = ?
+      ORDER BY fact.confirmedAt, fact.executionRecordId`).all(
+        normalizedUserId,
+        normalizedArbitrageId,
+      ) as unknown as ExecutionAccountingFactRow[];
+    return Object.freeze(rows.map(executionAccountingFactFromRow));
+  }
+
+  private persistExecutionAccountingEvidence(
+    userId: string,
+    arbitrageId: string,
+    update: ExecutionResultUpdate,
+    authoritativeCorrection: boolean,
+  ) {
+    if (update.accountingEvidence === undefined) return;
+    try {
+      this.upsertExecutionAccountingFact(
+        userId,
+        arbitrageId,
+        update.executionIntentId,
+        update.accountingEvidence,
+        authoritativeCorrection,
+      );
+    } catch (error) {
+      console.error("[accounting] authoritative execution fact upsert failed",
+        error instanceof Error ? error.message : "unknown error");
+    }
+  }
+
+  private upsertExecutionAccountingFact(
+    userId: string,
+    arbitrageId: string,
+    executionIntentId: string,
+    evidence: ExecutionAccountingFactCandidate,
+    authoritativeCorrection: boolean,
+  ) {
+    const normalizedEvidence = createExecutionAccountingEvidence(evidence);
+    const instance = this.requireForUser(identifier(userId, "userId"), identifier(arbitrageId, "arbitrageId"));
+    const reference = instance.executionReferences.find((candidate) => candidate.executionIntentId === executionIntentId);
+    if (!reference?.executionRecordId || (reference.phase !== "OPENING" && reference.phase !== "CLOSING")
+      || (reference.status !== "CONFIRMED" && reference.status !== "FAILED")
+      || reference.confirmedQuantity === "0") return;
+    if (normalizeUnsignedDecimal(normalizedEvidence.filledQuantity, "accounting filledQuantity")
+      !== normalizeUnsignedDecimal(reference.confirmedQuantity, "reference confirmedQuantity")) {
+      throw new Error("Accounting evidence quantity does not match the terminal execution reference.");
+    }
+    const record = this.db.prepare(`SELECT remoteOrderId FROM execution_records
+      WHERE executionId = ? AND intentId = ?`).get(
+        reference.executionRecordId,
+        reference.executionIntentId,
+      ) as { remoteOrderId: string | null } | undefined;
+    if (!record?.remoteOrderId || record.remoteOrderId !== normalizedEvidence.providerOrderId) {
+      throw new Error("Accounting evidence Provider order identity does not match the execution record.");
+    }
+    const existingRow = this.db.prepare(`SELECT * FROM execution_accounting_facts
+      WHERE executionRecordId = ?`).get(reference.executionRecordId) as ExecutionAccountingFactRow | undefined;
+    if (existingRow) {
+      const existing = executionAccountingFactFromRow(existingRow);
+      this.updateExecutionAccountingFact(existing, normalizedEvidence, reference.status, authoritativeCorrection);
+      return;
+    }
+    const priceCompleteness = normalizedEvidence.averageFillPrice === null ? "INCOMPLETE" : "COMPLETE";
+    const feeCompleteness = normalizedEvidence.feeAmountProvider === null
+      || normalizedEvidence.tradingFeeNetCostUsdt === null ? "INCOMPLETE" : "COMPLETE";
+    const completeness = priceCompleteness === "COMPLETE" && feeCompleteness === "COMPLETE"
+      ? "COMPLETE" : "INCOMPLETE";
+    this.db.prepare(`INSERT INTO execution_accounting_facts (
+      executionRecordId, arbitrageId, legId, executionIntentId, providerOrderId,
+      executionPhase, quantityEffect, terminalExecutionStatus, filledQuantity,
+      averageFillPrice, feeAmountProvider, feeAsset, tradingFeeNetCostUsdt,
+      confirmedAt, priceCompleteness, feeCompleteness, integrityStatus, completeness, createdAt
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'VERIFIED', ?, ?)`).run(
+      reference.executionRecordId,
+      instance.arbitrageId,
+      reference.legId,
+      reference.executionIntentId,
+      normalizedEvidence.providerOrderId,
+      reference.phase,
+      reference.quantityEffect,
+      reference.status,
+      normalizeUnsignedDecimal(normalizedEvidence.filledQuantity, "accounting filledQuantity"),
+      normalizedEvidence.averageFillPrice,
+      normalizedEvidence.feeAmountProvider,
+      normalizedEvidence.feeAsset,
+      normalizedEvidence.tradingFeeNetCostUsdt,
+      timestamp(normalizedEvidence.confirmedAt, "accounting confirmedAt"),
+      priceCompleteness,
+      feeCompleteness,
+      completeness,
+      timestamp(normalizedEvidence.confirmedAt, "accounting createdAt"),
+    );
+  }
+
+  private updateExecutionAccountingFact(
+    existing: ExecutionAccountingFact,
+    evidence: ReturnType<typeof createExecutionAccountingEvidence>,
+    terminalStatus: "CONFIRMED" | "FAILED",
+    authoritativeCorrection: boolean,
+  ) {
+    if (existing.providerOrderId !== evidence.providerOrderId) {
+      throw new Error("Accounting evidence Provider order identity cannot change.");
+    }
+    const quantityComparison = compareUnsignedDecimals(evidence.filledQuantity, existing.filledQuantity);
+    if (quantityComparison < 0) {
+      this.db.prepare(`UPDATE execution_accounting_facts
+        SET integrityStatus = 'NEEDS_CHECK', completeness = 'INCOMPLETE'
+        WHERE executionRecordId = ?`).run(existing.executionRecordId);
+      return;
+    }
+    const quantityExpanded = quantityComparison > 0;
+    const price = mergeAccountingField(
+      existing.averageFillPrice,
+      evidence.averageFillPrice,
+      quantityExpanded,
+      authoritativeCorrection,
+    );
+    const feeEvidenceChanged = existing.feeAmountProvider !== evidence.feeAmountProvider
+      || existing.feeAsset !== evidence.feeAsset
+      || existing.tradingFeeNetCostUsdt !== evidence.tradingFeeNetCostUsdt;
+    const feeReliable = evidence.feeAmountProvider !== null && evidence.tradingFeeNetCostUsdt !== null;
+    const existingFeeReliable = existing.feeCompleteness === "COMPLETE"
+      && existing.feeAmountProvider !== null && existing.tradingFeeNetCostUsdt !== null;
+    const acceptFee = feeReliable && (!existingFeeReliable || quantityExpanded || authoritativeCorrection || !feeEvidenceChanged);
+    const conflictingStrongReplay = !authoritativeCorrection && !quantityExpanded
+      && ((existing.averageFillPrice !== null && evidence.averageFillPrice !== null
+        && existing.averageFillPrice !== evidence.averageFillPrice)
+        || (existingFeeReliable && feeReliable && feeEvidenceChanged));
+    const integrityStatus = authoritativeCorrection
+      ? "VERIFIED"
+      : conflictingStrongReplay || existing.integrityStatus === "NEEDS_CHECK" ? "NEEDS_CHECK" : "VERIFIED";
+    const feeAmountProvider = acceptFee ? evidence.feeAmountProvider : existing.feeAmountProvider;
+    const feeAsset = acceptFee ? evidence.feeAsset : existing.feeAsset;
+    const tradingFeeNetCostUsdt = acceptFee
+      ? evidence.tradingFeeNetCostUsdt : existing.tradingFeeNetCostUsdt;
+    const priceCompleteness = price.reliable ? "COMPLETE" : "INCOMPLETE";
+    const feeCompleteness = acceptFee
+      ? "COMPLETE"
+      : quantityExpanded ? "INCOMPLETE" : existing.feeCompleteness;
+    const evidenceEnriched = existing.priceCompleteness === "INCOMPLETE" && priceCompleteness === "COMPLETE"
+      || existing.feeCompleteness === "INCOMPLETE" && feeCompleteness === "COMPLETE";
+    const confirmedAt = quantityExpanded || authoritativeCorrection
+      || evidenceEnriched || existing.terminalExecutionStatus !== terminalStatus
+      ? Math.max(existing.confirmedAt, evidence.confirmedAt)
+      : existing.confirmedAt;
+    const completeness = integrityStatus === "VERIFIED"
+      && priceCompleteness === "COMPLETE" && feeCompleteness === "COMPLETE"
+      ? "COMPLETE" : "INCOMPLETE";
+    this.db.prepare(`UPDATE execution_accounting_facts SET
+      terminalExecutionStatus = ?, filledQuantity = ?, averageFillPrice = ?,
+      feeAmountProvider = ?, feeAsset = ?, tradingFeeNetCostUsdt = ?, confirmedAt = ?,
+      priceCompleteness = ?, feeCompleteness = ?, integrityStatus = ?, completeness = ?
+      WHERE executionRecordId = ?`).run(
+        terminalStatus,
+        evidence.filledQuantity,
+        price.value,
+        feeAmountProvider,
+        feeAsset,
+        tradingFeeNetCostUsdt,
+        confirmedAt,
+        priceCompleteness,
+        feeCompleteness,
+        integrityStatus,
+        completeness,
+        existing.executionRecordId,
+      );
   }
 
   applyHistoricalExecutionCorrection(
@@ -1191,7 +1398,38 @@ export class ArbitrageInstanceStore {
     update: ExecutionResultUpdate,
     recoveryAudit?: HistoricalReconcileAudit,
   ): ArbitrageInstance {
-    return this.applyExecutionProjection(userId, arbitrageId, update, true, recoveryAudit);
+    let projected: ArbitrageInstance;
+    try {
+      projected = this.applyExecutionProjection(userId, arbitrageId, update, true, recoveryAudit);
+    } catch (error) {
+      this.markAccountingQuantityConflict(userId, arbitrageId, update);
+      throw error;
+    }
+    this.persistExecutionAccountingEvidence(userId, arbitrageId, update, true);
+    return projected;
+  }
+
+  private markAccountingQuantityConflict(userId: string, arbitrageId: string, update: ExecutionResultUpdate) {
+    if (update.accountingEvidence === undefined) return;
+    try {
+      const evidence = createExecutionAccountingEvidence(update.accountingEvidence);
+      const row = this.db.prepare(`SELECT fact.* FROM execution_accounting_facts fact
+        JOIN arbitrage_instances owner ON owner.arbitrageId = fact.arbitrageId
+        WHERE owner.userId = ? AND fact.arbitrageId = ? AND fact.executionIntentId = ?`).get(
+          identifier(userId, "userId"),
+          identifier(arbitrageId, "arbitrageId"),
+          identifier(update.executionIntentId, "executionIntentId"),
+        ) as ExecutionAccountingFactRow | undefined;
+      if (!row) return;
+      const existing = executionAccountingFactFromRow(row);
+      if (existing.providerOrderId !== evidence.providerOrderId
+        || compareUnsignedDecimals(evidence.filledQuantity, existing.filledQuantity) >= 0) return;
+      this.db.prepare(`UPDATE execution_accounting_facts
+        SET integrityStatus = 'NEEDS_CHECK', completeness = 'INCOMPLETE'
+        WHERE executionRecordId = ?`).run(existing.executionRecordId);
+    } catch {
+      // Never replace the authoritative execution projection error with accounting diagnostics.
+    }
   }
 
   repairLegacyPartialConfirmed(
@@ -2176,6 +2414,35 @@ export class ArbitrageInstanceStore {
         REFERENCES arbitrage_execution_references(arbitrageId, executionIntentId)
     ) STRICT;
 
+    CREATE TABLE IF NOT EXISTS execution_accounting_facts (
+      executionRecordId TEXT PRIMARY KEY,
+      arbitrageId TEXT NOT NULL,
+      legId TEXT NOT NULL,
+      executionIntentId TEXT NOT NULL UNIQUE,
+      providerOrderId TEXT NOT NULL,
+      executionPhase TEXT NOT NULL CHECK (executionPhase IN ('OPENING', 'CLOSING')),
+      quantityEffect TEXT NOT NULL CHECK (quantityEffect IN ('INCREASE', 'DECREASE')),
+      terminalExecutionStatus TEXT NOT NULL CHECK (terminalExecutionStatus IN ('CONFIRMED', 'FAILED')),
+      filledQuantity TEXT NOT NULL,
+      averageFillPrice TEXT,
+      feeAmountProvider TEXT,
+      feeAsset TEXT,
+      tradingFeeNetCostUsdt TEXT,
+      confirmedAt INTEGER NOT NULL,
+      priceCompleteness TEXT NOT NULL CHECK (priceCompleteness IN ('COMPLETE', 'INCOMPLETE')),
+      feeCompleteness TEXT NOT NULL CHECK (feeCompleteness IN ('COMPLETE', 'INCOMPLETE')),
+      integrityStatus TEXT NOT NULL CHECK (integrityStatus IN ('VERIFIED', 'NEEDS_CHECK')),
+      completeness TEXT NOT NULL CHECK (completeness IN ('COMPLETE', 'INCOMPLETE')),
+      createdAt INTEGER NOT NULL,
+      FOREIGN KEY (arbitrageId, legId) REFERENCES arbitrage_instance_legs(arbitrageId, legId),
+      FOREIGN KEY (arbitrageId, executionIntentId)
+        REFERENCES arbitrage_execution_references(arbitrageId, executionIntentId),
+      FOREIGN KEY (executionRecordId) REFERENCES execution_records(executionId)
+    ) STRICT;
+
+    CREATE INDEX IF NOT EXISTS execution_accounting_facts_instance_time
+      ON execution_accounting_facts(arbitrageId, confirmedAt, executionRecordId);
+
     CREATE TABLE IF NOT EXISTS arbitrage_unstarted_abandonments (
       commandId TEXT PRIMARY KEY,
       operationType TEXT NOT NULL CHECK (operationType = 'ABANDON_UNSTARTED_ARBITRAGE'),
@@ -2870,6 +3137,40 @@ function normalizeExecutionResult(update: ExecutionResultUpdate): ExecutionResul
   });
 }
 
+function executionAccountingFactFromRow(row: ExecutionAccountingFactRow): ExecutionAccountingFact {
+  if ((row.executionPhase !== "OPENING" && row.executionPhase !== "CLOSING")
+    || (row.quantityEffect !== "INCREASE" && row.quantityEffect !== "DECREASE")
+    || (row.terminalExecutionStatus !== "CONFIRMED" && row.terminalExecutionStatus !== "FAILED")
+    || (row.priceCompleteness !== "COMPLETE" && row.priceCompleteness !== "INCOMPLETE")
+    || (row.feeCompleteness !== "COMPLETE" && row.feeCompleteness !== "INCOMPLETE")
+    || (row.integrityStatus !== "VERIFIED" && row.integrityStatus !== "NEEDS_CHECK")
+    || (row.completeness !== "COMPLETE" && row.completeness !== "INCOMPLETE")) {
+    throw new Error("Persisted execution accounting fact enum is invalid.");
+  }
+  return Object.freeze({
+    executionRecordId: identifier(row.executionRecordId, "executionRecordId"),
+    arbitrageId: identifier(row.arbitrageId, "arbitrageId"),
+    legId: identifier(row.legId, "legId"),
+    executionIntentId: identifier(row.executionIntentId, "executionIntentId"),
+    providerOrderId: identifier(row.providerOrderId, "providerOrderId"),
+    executionPhase: row.executionPhase,
+    quantityEffect: row.quantityEffect,
+    terminalExecutionStatus: row.terminalExecutionStatus,
+    filledQuantity: normalizeUnsignedDecimal(row.filledQuantity, "filledQuantity"),
+    averageFillPrice: row.averageFillPrice === null ? null : normalizePositiveDecimal(row.averageFillPrice, "averageFillPrice"),
+    feeAmountProvider: row.feeAmountProvider === null ? null : normalizeSignedDecimal(row.feeAmountProvider, "feeAmountProvider"),
+    feeAsset: row.feeAsset === null ? null : asset(row.feeAsset),
+    tradingFeeNetCostUsdt: row.tradingFeeNetCostUsdt === null
+      ? null : normalizeSignedDecimal(row.tradingFeeNetCostUsdt, "tradingFeeNetCostUsdt"),
+    confirmedAt: timestamp(row.confirmedAt, "confirmedAt"),
+    priceCompleteness: row.priceCompleteness,
+    feeCompleteness: row.feeCompleteness,
+    integrityStatus: row.integrityStatus,
+    completeness: row.completeness,
+    createdAt: timestamp(row.createdAt, "createdAt"),
+  });
+}
+
 function normalizePnl(pnl: ArbitragePnlSummary): ArbitragePnlSummary {
   const values = {
     cumulativeFundingPnl: nullableSignedDecimal(pnl.cumulativeFundingPnl, "cumulativeFundingPnl"),
@@ -2997,6 +3298,21 @@ function terminalStatusCorrectionAllowed(
   return reference.status === "FAILED"
     && update.status === "CONFIRMED"
     && update.confirmedQuantity === reference.requestedQuantity;
+}
+
+function mergeAccountingField(
+  existing: string | null,
+  incoming: string | null,
+  quantityExpanded: boolean,
+  authoritativeCorrection: boolean,
+) {
+  if (incoming === null) {
+    return { value: existing, reliable: !quantityExpanded && existing !== null } as const;
+  }
+  if (existing === null || quantityExpanded || authoritativeCorrection || existing === incoming) {
+    return { value: incoming, reliable: true } as const;
+  }
+  return { value: existing, reliable: true } as const;
 }
 
 function decimalParts(value: string) {

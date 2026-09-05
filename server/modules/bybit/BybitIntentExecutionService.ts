@@ -4,6 +4,7 @@ import { runExecutionPreMutationPhase } from "../cex/ExecutionCapability";
 import type { ExecutionIntent } from "../cex/ExecutionIntent";
 import { createExecutionQueryObservation, type ExecutionQueryObservation } from "../cex/ExecutionQueryCapability";
 import type { ExecutionStatus } from "../cex/ExecutionState";
+import { createExecutionAccountingEvidence } from "../cex/ExecutionAccountingEvidence";
 import {
   isTrustedVerifiedManagedCloseNativeExecutionRules,
   type FormalManagedCloseExecutionContext,
@@ -445,6 +446,16 @@ function observationForOrder(
     state: normalizedStatus === "SUBMITTED" ? "PENDING_CONFIRMATION" : normalizedStatus,
     filledBaseQuantity: filled,
     observedAt: finalObservedAt,
+    accountingEvidence: createExecutionAccountingEvidence({
+      providerOrderId: order.orderId,
+      filledQuantity: filled,
+      averageFillPrice: order.averagePrice,
+      feeAmountProvider: order.fee,
+      feeAsset: order.feeCurrency,
+      tradingFeeNetCostUsdt: order.feeCurrency === "USDT" ? order.fee : null,
+      confirmedAt: finalObservedAt,
+      completeness: order.averagePrice !== null && order.feeCurrency === "USDT" ? "COMPLETE" : "INCOMPLETE",
+    }),
   });
   return Object.freeze({ observation, statusReason: null as string | null });
 }

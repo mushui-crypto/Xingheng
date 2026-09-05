@@ -403,6 +403,9 @@ export class ArbitrageExecutionCloseService {
       ...(runtimeResult.mutationDisposition === "NOT_DISPATCHED"
         ? { mutationDisposition: runtimeResult.mutationDisposition }
         : {}),
+      ...(runtimeResult.accountingEvidence === undefined
+        ? {}
+        : { accountingEvidence: runtimeResult.accountingEvidence }),
       updatedAt: runtimeResult.executionRecord.updatedAt,
     });
     const reference = updated.executionReferences.find((candidate) => candidate.executionIntentId === intent.intentId)!;

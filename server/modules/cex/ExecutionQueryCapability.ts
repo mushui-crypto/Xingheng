@@ -1,10 +1,12 @@
 import { createExecutionRecord, syncExecutionRecordState, type ExecutionRecord } from "./ExecutionRecord";
 import { transitionExecutionState, type ExecutionStateEvent } from "./ExecutionState";
+import { createExecutionAccountingEvidence, type ExecutionAccountingEvidence } from "./ExecutionAccountingEvidence";
 
 export type ExecutionQueryObservation = Readonly<{
   state: "CONFIRMED" | "PENDING_CONFIRMATION" | "FAILED" | "UNKNOWN";
   filledBaseQuantity: string;
   observedAt: number;
+  accountingEvidence?: ExecutionAccountingEvidence;
 }>;
 
 export interface ExecutionQueryCapability {
@@ -13,7 +15,7 @@ export interface ExecutionQueryCapability {
 
 export function createExecutionQueryObservation(input: unknown): ExecutionQueryObservation {
   const value = object(input, "ExecutionQueryObservation");
-  assertExactKeys(value, ["state", "filledBaseQuantity", "observedAt"], "ExecutionQueryObservation");
+  assertExactKeys(value, ["state", "filledBaseQuantity", "observedAt", "accountingEvidence"], "ExecutionQueryObservation");
   if (
     value.state !== "CONFIRMED"
     && value.state !== "PENDING_CONFIRMATION"
@@ -28,11 +30,27 @@ export function createExecutionQueryObservation(input: unknown): ExecutionQueryO
   if (typeof value.observedAt !== "number" || !Number.isSafeInteger(value.observedAt) || value.observedAt < 0) {
     throw new Error("observedAt must be a non-negative integer timestamp.");
   }
-  return Object.freeze({
+  const accountingEvidence = value.accountingEvidence === undefined
+    ? undefined
+    : createExecutionAccountingEvidence(value.accountingEvidence);
+  const observation: {
+    state: ExecutionQueryObservation["state"];
+    filledBaseQuantity: string;
+    observedAt: number;
+    accountingEvidence?: ExecutionAccountingEvidence;
+  } = {
     state: value.state,
     filledBaseQuantity: value.filledBaseQuantity,
     observedAt: value.observedAt,
-  });
+  };
+  if (accountingEvidence !== undefined) {
+    Object.defineProperty(observation, "accountingEvidence", {
+      value: accountingEvidence,
+      enumerable: false,
+      writable: false,
+    });
+  }
+  return Object.freeze(observation);
 }
 
 export function applyExecutionQueryObservation(

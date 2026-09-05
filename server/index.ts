@@ -239,7 +239,12 @@ const executionOrderReferenceStore = new SqliteExecutionOrderReferenceStore({
 });
 const arbitrageInstances = new ArbitrageInstanceStore({ dbPath: process.env.TRADING_DB_PATH });
 const arbitrageInstanceQuery = new ArbitrageInstanceQueryService(arbitrageInstances);
-const arbitragePositionPresentation = new ArbitragePositionPresentationService(arbitrageDashboard);
+const arbitragePositionPresentation = new ArbitragePositionPresentationService(
+  arbitrageDashboard,
+  Date.now,
+  undefined,
+  arbitrageInstances,
+);
 const arbitragePositionVerification = createDefaultArbitragePositionVerificationService({
   query: arbitrageInstanceQuery,
   credentials: userExchangeCredentials,

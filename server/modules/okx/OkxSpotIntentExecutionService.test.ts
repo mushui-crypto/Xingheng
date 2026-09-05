@@ -121,6 +121,17 @@ test("Spot accepts Decimal signed base and quote fees without using balance delt
   }
 });
 
+test("Spot exposes authoritative fill price and signed USDT fee accounting evidence", async () => {
+  const client = new FakeClient();
+  client.order = { averagePrice: "0.1", fee: "-0.003", feeCcy: "USDT" };
+  const service = spotService(client);
+  const result = await service.query(lookup(await service.execute(intent())));
+
+  assert.equal(result.observation.accountingEvidence?.averageFillPrice, "0.1");
+  assert.equal(result.observation.accountingEvidence?.tradingFeeNetCostUsdt, "0.003");
+  assert.equal(result.observation.accountingEvidence?.completeness, "COMPLETE");
+});
+
 test("Spot rejects malformed or unattributable fee evidence", async () => {
   for (const order of [
     { fee: "not-a-decimal", feeCcy: "USDT" },

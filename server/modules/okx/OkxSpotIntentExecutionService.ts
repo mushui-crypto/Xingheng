@@ -25,6 +25,7 @@ import {
   type OkxSpotQuantityRulesSource,
 } from "./OkxSpotQuantitySemantics";
 import type { OkxCancelOrderRequest, OkxPlaceOrderRequest, OkxProviderOrder } from "./OkxTypes";
+import { createExecutionAccountingEvidence, negateSignedDecimal } from "../cex/ExecutionAccountingEvidence";
 
 export type OkxSpotIntentExecutionServiceOptions = Readonly<{
   instrumentMapping?: OkxInstrumentMappingAdapter;
@@ -114,11 +115,15 @@ export class OkxSpotIntentExecutionService {
     });
     if (order.instId !== lookup.instId) throw new Error("OKX Spot order response instrument identity does not match the execution order.");
     const result = observationForSpotOrder(order, lookup, rules);
+    const finalObservedAt = order.updatedAt === null ? observedAt : Math.max(observedAt, order.updatedAt);
     return Object.freeze({
       observation: createExecutionQueryObservation({
         state: result.state,
         filledBaseQuantity: result.filledBaseQuantity,
-        observedAt: order.updatedAt === null ? observedAt : Math.max(observedAt, order.updatedAt),
+        observedAt: finalObservedAt,
+        ...(result.state === "UNKNOWN"
+          ? {}
+          : { accountingEvidence: okxSpotAccountingEvidence(order, result.filledBaseQuantity, finalObservedAt) }),
       }),
       orderIdentity: Object.freeze({ instId: order.instId, ordId: order.ordId, clOrdId: order.clOrdId }),
       fee: order.fee,
@@ -186,6 +191,24 @@ export class OkxSpotIntentExecutionService {
     if (!Number.isSafeInteger(value) || value < 0) throw new Error("OKX Spot execution clock must return a non-negative integer timestamp.");
     return value;
   }
+}
+
+function okxSpotAccountingEvidence(order: OkxProviderOrder, filledQuantity: string, confirmedAt: number) {
+  const feeAsset = order.feeCcy ?? null;
+  const netCost = order.fee === "0"
+    ? "0"
+    : feeAsset === "USDT" ? negateSignedDecimal(order.fee) : null;
+  return createExecutionAccountingEvidence({
+    providerOrderId: order.ordId,
+    filledQuantity,
+    averageFillPrice: order.averagePrice,
+    feeAmountProvider: signedDecimal(order.fee) ? order.fee : null,
+    feeAsset,
+    tradingFeeNetCostUsdt: netCost,
+    confirmedAt,
+    completeness: order.averagePrice !== null && signedDecimal(order.fee) && netCost !== null
+      ? "COMPLETE" : "INCOMPLETE",
+  });
 }
 
 function assertSpotInstrument(instrument: OkxInstrumentResolution) {

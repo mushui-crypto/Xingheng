@@ -124,20 +124,79 @@ test("fails managed scale closed for non-USDT or stale valuation facts", async (
   assert.equal(stale?.market.spreadQuotePerBase, null);
 });
 
-test("keeps all five frozen revenue fields null and incomplete", async () => {
+test("keeps all four realized revenue fields null and incomplete without accounting facts", async () => {
   const service = serviceFor([
     market("binance", "spot", 100, 101),
     market("binance", "perpetual", 110, 111, { fundingRate: 0.001, markPrice: 110 }),
   ]);
   const [result] = await service.present([instance("binance", "binance", "DOGE-USDT-SPOT")]);
   assert.deepEqual(result?.revenue, {
-    expectedArbitrageNetProfit: null,
     cumulativeFundingIncome: null,
+    cumulativeFundingIncomeCompleteness: "INCOMPLETE",
     incurredFees: null,
-    estimatedExitFees: null,
-    exitSpreadProfit: null,
+    incurredFeesCompleteness: "INCOMPLETE",
+    realizedSpreadProfit: null,
+    realizedSpreadProfitCompleteness: "INCOMPLETE",
+    realizedNetProfit: null,
+    realizedNetProfitCompleteness: "INCOMPLETE",
     completeness: "INCOMPLETE",
   });
+});
+
+test("presents reliable fees and realized spread independently while funding and net profit remain incomplete", async () => {
+  const base = instance("binance", "bitget", "DOGE-USDT-PERP");
+  const references = [
+    accountingReference("lo", "long", "OPENING", "2"),
+    accountingReference("so", "short", "OPENING", "2"),
+    accountingReference("lc", "long", "CLOSING", "1"),
+    accountingReference("sc", "short", "CLOSING", "1"),
+  ];
+  const withFacts = { ...base, executionReferences: references } as ArbitrageInstance;
+  const service = new ArbitragePositionPresentationService({ async getCurrentMarketSnapshot() {
+    return { generatedAt: now, markets: [
+      market("binance", "perpetual", 104, 105, { fundingRate: 0.001, markPrice: 104 }),
+      market("bitget", "perpetual", 102, 103, { fundingRate: 0.002, markPrice: 103 }),
+    ] };
+  } }, () => now, 20_000, {
+    listExecutionAccountingFacts: () => [
+      accountingFact("lo", "long", "OPENING", "2", "100", "0.01"),
+      accountingFact("so", "short", "OPENING", "2", "110", "0.01"),
+      accountingFact("lc", "long", "CLOSING", "1", "105", "0.01"),
+      accountingFact("sc", "short", "CLOSING", "1", "103", "-0.005"),
+    ],
+  });
+  const [result] = await service.present([withFacts]);
+  assert.deepEqual(result?.revenue, {
+    cumulativeFundingIncome: null,
+    cumulativeFundingIncomeCompleteness: "INCOMPLETE",
+    incurredFees: "0.025",
+    incurredFeesCompleteness: "COMPLETE",
+    realizedSpreadProfit: "12",
+    realizedSpreadProfitCompleteness: "COMPLETE",
+    realizedNetProfit: null,
+    realizedNetProfitCompleteness: "INCOMPLETE",
+    completeness: "INCOMPLETE",
+  });
+});
+
+test("presentation recovers from a missing expected fact after a later authoritative upsert", async () => {
+  const value = { ...instance("binance", "bitget", "DOGE-USDT-PERP"), executionReferences: [
+    accountingReference("lo", "long", "OPENING", "2"),
+    accountingReference("so", "short", "OPENING", "2"),
+  ] } as ArbitrageInstance;
+  const facts = [accountingFact("lo", "long", "OPENING", "2", "100", "0.1")];
+  const service = serviceFor([
+    market("binance", "perpetual", 99, 100, { fundingRate: 0.001, markPrice: 100 }),
+    market("bitget", "perpetual", 109, 110, { fundingRate: 0.001, markPrice: 110 }),
+  ], undefined, { listExecutionAccountingFacts: () => facts });
+
+  const [missing] = await service.present([value]);
+  assert.equal(missing?.revenue.incurredFees, null);
+  assert.equal(missing?.revenue.realizedSpreadProfit, null);
+  facts.push(accountingFact("so", "short", "OPENING", "2", "110", "0.1"));
+  const [recovered] = await service.present([value]);
+  assert.equal(recovered?.revenue.incurredFees, "0.2");
+  assert.equal(recovered?.revenue.realizedSpreadProfit, "0");
 });
 
 test("isolates one invalid instrument mapping without failing the batch", async () => {
@@ -152,11 +211,36 @@ test("isolates one invalid instrument mapping without failing the batch", async 
   assert.equal(results[1]?.market.completeness, "COMPLETE");
 });
 
-function serviceFor(markets: ArbitrageMarket[], onRead = () => undefined) {
+function serviceFor(
+  markets: ArbitrageMarket[],
+  onRead = () => undefined,
+  accountingSource?: ConstructorParameters<typeof ArbitragePositionPresentationService>[3],
+) {
   return new ArbitragePositionPresentationService({ async getCurrentMarketSnapshot() {
     onRead();
     return { generatedAt: now, markets };
-  } }, () => now);
+  } }, () => now, undefined, accountingSource);
+}
+
+function accountingReference(id: string, legId: string, phase: "OPENING" | "CLOSING", quantity: string) {
+  return {
+    arbitrageId: "arb-1", legId, phase, quantityEffect: phase === "OPENING" ? "INCREASE" as const : "DECREASE" as const,
+    executionIntentId: id, executionRecordId: `record-${id}`, requestedQuantity: quantity,
+    confirmedQuantity: quantity, status: "CONFIRMED" as const, createdAt: now - 2, updatedAt: now - 1,
+  };
+}
+
+function accountingFact(id: string, legId: string, executionPhase: "OPENING" | "CLOSING", quantity: string, price: string, fee: string) {
+  return {
+    executionRecordId: `record-${id}`, arbitrageId: "arb-1", legId, executionIntentId: id,
+    providerOrderId: `order-${id}`, executionPhase,
+    quantityEffect: executionPhase === "OPENING" ? "INCREASE" as const : "DECREASE" as const,
+    terminalExecutionStatus: "CONFIRMED" as const, filledQuantity: quantity, averageFillPrice: price,
+    feeAmountProvider: fee, feeAsset: "USDT", tradingFeeNetCostUsdt: fee,
+    confirmedAt: now - 1, priceCompleteness: "COMPLETE" as const,
+    feeCompleteness: "COMPLETE" as const, integrityStatus: "VERIFIED" as const,
+    completeness: "COMPLETE" as const, createdAt: now - 1,
+  };
 }
 
 function instance(longVenue: "binance" | "bitget", shortVenue: "binance" | "bitget", longInstrument: string, id = "arb-1") {

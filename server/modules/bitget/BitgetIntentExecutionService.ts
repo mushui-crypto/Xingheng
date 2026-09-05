@@ -9,6 +9,7 @@ import { runExecutionPreMutationPhase } from "../cex/ExecutionCapability";
 import type { ExecutionIntent } from "../cex/ExecutionIntent";
 import { createExecutionQueryObservation, type ExecutionQueryObservation } from "../cex/ExecutionQueryCapability";
 import type { ExecutionStatus } from "../cex/ExecutionState";
+import { createExecutionAccountingEvidence } from "../cex/ExecutionAccountingEvidence";
 import { ExecutionMutationSafetyGuard, type ExecutionMutationContext, type ExecutionMutationEffect, type ExecutionProviderIdentityValidator } from "../cex/ExecutionMutationSafetyGuard";
 import { BitgetInstrumentMappingAdapter, type BitgetInstrumentResolution } from "./BitgetInstrumentMapping";
 import {
@@ -405,7 +406,21 @@ function observationForOrder(
     ? "CONFIRMED" as const
     : order.status;
   return Object.freeze({
-    observation: createExecutionQueryObservation({ state: normalizedStatus, filledBaseQuantity: filled, observedAt: finalObservedAt }),
+    observation: createExecutionQueryObservation({
+      state: normalizedStatus,
+      filledBaseQuantity: filled,
+      observedAt: finalObservedAt,
+      accountingEvidence: createExecutionAccountingEvidence({
+        providerOrderId: order.orderId,
+        filledQuantity: filled,
+        averageFillPrice: order.averagePrice,
+        feeAmountProvider: order.feeCurrency === null ? null : order.fee,
+        feeAsset: order.feeCurrency,
+        tradingFeeNetCostUsdt: order.feeCurrency === "USDT" ? order.fee : null,
+        confirmedAt: finalObservedAt,
+        completeness: order.averagePrice !== null && order.feeCurrency === "USDT" ? "COMPLETE" : "INCOMPLETE",
+      }),
+    }),
     statusReason: null as string | null,
   });
 }

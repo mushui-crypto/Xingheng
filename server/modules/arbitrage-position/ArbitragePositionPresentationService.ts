@@ -3,6 +3,10 @@ import type { ArbitrageInstance, ArbitrageInstanceLeg } from "../cex/arbitrage-i
 import { activeManagedQuantity } from "../cex/arbitrage-instance/ArbitrageInstance";
 import { canonicalInstrumentFromId } from "../cex/Instrument";
 import { InstrumentCapability } from "../cex/InstrumentCapability";
+import {
+  deriveRealizedAccounting,
+  type ExecutionAccountingFact,
+} from "../cex/arbitrage-instance/ExecutionAccountingFact";
 
 const DEFAULT_MARKET_MAX_AGE_MS = 20_000;
 const NORMALIZED_FUNDING_INTERVAL_HOURS = 8;
@@ -31,11 +35,14 @@ export type ArbitragePositionPresentation = Readonly<{
     completeness: Completeness;
   }>;
   revenue: Readonly<{
-    expectedArbitrageNetProfit: null;
     cumulativeFundingIncome: null;
-    incurredFees: null;
-    estimatedExitFees: null;
-    exitSpreadProfit: null;
+    cumulativeFundingIncomeCompleteness: "INCOMPLETE";
+    incurredFees: string | null;
+    incurredFeesCompleteness: Completeness;
+    realizedSpreadProfit: string | null;
+    realizedSpreadProfitCompleteness: Completeness;
+    realizedNetProfit: null;
+    realizedNetProfitCompleteness: "INCOMPLETE";
     completeness: "INCOMPLETE";
   }>;
 }>;
@@ -70,6 +77,10 @@ export type PositionMarketSnapshotSource = Readonly<{
   getCurrentMarketSnapshot(): Promise<Readonly<{ generatedAt: number; markets: readonly ArbitrageMarket[] }>>;
 }>;
 
+export type ExecutionAccountingFactSource = Readonly<{
+  listExecutionAccountingFacts(userId: string, arbitrageId: string): readonly ExecutionAccountingFact[];
+}>;
+
 type MappedLeg = Readonly<{
   leg: ArbitrageInstanceLeg;
   canonical: ReturnType<typeof canonicalInstrumentFromId>;
@@ -84,20 +95,49 @@ export class ArbitragePositionPresentationService {
     private readonly marketSource: PositionMarketSnapshotSource,
     private readonly now: () => number = Date.now,
     private readonly marketMaxAgeMs = DEFAULT_MARKET_MAX_AGE_MS,
+    private readonly accountingSource?: ExecutionAccountingFactSource,
   ) {}
 
   async present(instances: readonly ArbitrageInstance[]) {
     const snapshot = await this.marketSource.getCurrentMarketSnapshot();
     return Object.freeze(instances.map((instance) => {
+      const revenue = this.presentRevenue(instance);
       try {
-        return this.presentInstance(instance, snapshot.markets);
+        return this.presentInstance(instance, snapshot.markets, revenue);
       } catch {
-        return incomplete(instance);
+        return incomplete(instance, revenue);
       }
     }));
   }
 
-  private presentInstance(instance: ArbitrageInstance, markets: readonly ArbitrageMarket[]): ArbitragePositionPresentation {
+  private presentRevenue(instance: ArbitrageInstance): ArbitragePositionPresentation["revenue"] {
+    if (!this.accountingSource) return incompleteRevenue();
+    try {
+      const summary = deriveRealizedAccounting(
+        instance,
+        this.accountingSource.listExecutionAccountingFacts(instance.userId, instance.arbitrageId),
+      );
+      return Object.freeze({
+        cumulativeFundingIncome: null,
+        cumulativeFundingIncomeCompleteness: "INCOMPLETE" as const,
+        incurredFees: summary.tradingFeeNetCostUsdt,
+        incurredFeesCompleteness: summary.tradingFeeCompleteness,
+        realizedSpreadProfit: summary.realizedSpreadProfit,
+        realizedSpreadProfitCompleteness: summary.realizedSpreadProfitCompleteness,
+        realizedNetProfit: null,
+        realizedNetProfitCompleteness: "INCOMPLETE" as const,
+        completeness: "INCOMPLETE" as const,
+      });
+    } catch {
+      return incompleteRevenue();
+    }
+  }
+
+  private presentInstance(
+    instance: ArbitrageInstance,
+    markets: readonly ArbitrageMarket[],
+    revenue: ArbitragePositionPresentation["revenue"],
+  ): ArbitragePositionPresentation {
     const now = this.now();
     const mapped: readonly MappedLeg[] = instance.legs.map((leg) => {
       const canonical = canonicalInstrumentFromId(leg.instrumentId);
@@ -144,7 +184,7 @@ export class ArbitragePositionPresentationService {
         marketDataAsOf,
         completeness: complete ? "COMPLETE" as const : "INCOMPLETE" as const,
       }),
-      revenue: incompleteRevenue(),
+      revenue,
     });
   }
 }
@@ -234,7 +274,10 @@ function presentManagedScale(instance: ArbitrageInstance, mapped: readonly Mappe
   };
 }
 
-function incomplete(instance: ArbitrageInstance): ArbitragePositionPresentation {
+function incomplete(
+  instance: ArbitrageInstance,
+  revenue: ArbitragePositionPresentation["revenue"] = incompleteRevenue(),
+): ArbitragePositionPresentation {
   const legs = instance.legs.map((leg) => {
     const spot = leg.instrumentId.endsWith("-SPOT");
     return Object.freeze({
@@ -255,7 +298,7 @@ function incomplete(instance: ArbitrageInstance): ArbitragePositionPresentation 
       spreadQuotePerBase: null, spreadBps: null, quotedAt: null, marketDataAsOf: null,
       completeness: "INCOMPLETE" as const,
     }),
-    revenue: incompleteRevenue(),
+    revenue,
   });
 }
 
@@ -269,8 +312,11 @@ function incompleteManagedScale() {
 
 function incompleteRevenue() {
   return Object.freeze({
-    expectedArbitrageNetProfit: null, cumulativeFundingIncome: null, incurredFees: null,
-    estimatedExitFees: null, exitSpreadProfit: null, completeness: "INCOMPLETE" as const,
+    cumulativeFundingIncome: null, cumulativeFundingIncomeCompleteness: "INCOMPLETE" as const,
+    incurredFees: null, incurredFeesCompleteness: "INCOMPLETE" as const,
+    realizedSpreadProfit: null, realizedSpreadProfitCompleteness: "INCOMPLETE" as const,
+    realizedNetProfit: null, realizedNetProfitCompleteness: "INCOMPLETE" as const,
+    completeness: "INCOMPLETE" as const,
   });
 }
 
