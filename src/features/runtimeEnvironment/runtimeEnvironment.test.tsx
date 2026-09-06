@@ -28,11 +28,11 @@ const productionIdentity = {
   composeProject: "xingheng" as const,
 };
 
-test("health identity accepts exact production and local development pairs", () => {
+test("health identity accepts production but fails closed without an explicit development build", () => {
   assert.deepEqual(parseRuntimeEnvironmentIdentity(productionIdentity), productionIdentity);
-  assert.deepEqual(
-    parseRuntimeEnvironmentIdentity({ deploymentEnvironment: "development", composeProject: "development" }),
-    { deploymentEnvironment: "development", composeProject: "development" },
+  assert.throws(
+    () => parseRuntimeEnvironmentIdentity({ deploymentEnvironment: "development", composeProject: "development" }),
+    RuntimeEnvironmentValidationError,
   );
 });
 

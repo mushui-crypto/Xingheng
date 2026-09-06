@@ -34,5 +34,7 @@ export const localArbitragePresentation: ArbitragePositionPresentation = {
 };
 
 export function isLocalFixtureRuntime() {
-  return typeof window !== "undefined" && window.location.hostname === "localhost";
+  return import.meta.env?.DEV === true
+    && typeof window !== "undefined"
+    && window.location.hostname === "localhost";
 }

@@ -39,7 +39,8 @@ export function parseRuntimeEnvironmentIdentity(payload: unknown): RuntimeEnviro
 
   if (
     (deploymentEnvironment === "production" && composeProject === "xingheng")
-    || (deploymentEnvironment === "development" && composeProject === "development")
+    || (import.meta.env?.DEV === true
+      && deploymentEnvironment === "development" && composeProject === "development")
   ) {
     return { deploymentEnvironment, composeProject };
   }
