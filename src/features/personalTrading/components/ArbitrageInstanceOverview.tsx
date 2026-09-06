@@ -606,7 +606,7 @@ function InstanceCard({ historical, instance, onExitHedge, onInstanceRefresh, on
         <PrimaryMetric label="净资金费率" {...fundingRatePresentation(presentation)} />
         <PrimaryMetric label="下次预计净资金费用" {...estimatedFundingPresentation(presentation)} />
         <PrimaryMetric label="距下次结算" value={<PositionFundingCountdown presentation={presentation} />} valueClassName="tabular-nums" />
-        <PrimaryMetric label="当前退出价差" {...spreadPresentation(presentation, pair.quote)} />
+        <PrimaryMetric label="当前退出价差" {...spreadPresentation(presentation)} />
         <PrimaryMetric label="管理规模" {...managedScalePresentation(presentation)} />
         <PrimaryMetric label="累计资金费收入" {...cumulativeFundingPresentation(presentation)} />
       </dl>
@@ -936,7 +936,7 @@ function managedScalePresentation(presentation?: ArbitragePositionPresentation) 
   if (market?.managedScaleCompleteness !== "COMPLETE" || market.managedScaleUsdt == null) {
     return { value: "暂无可靠数据", tone: "neutral" as const };
   }
-  return { value: compactDecimal(market.managedScaleUsdt, 4), unit: "USDT", detail: "当前配对名义规模", tone: "neutral" as const, valueClassName: "whitespace-nowrap" };
+  return { value: compactDecimal(market.managedScaleUsdt, 4), unit: "USDT", tone: "neutral" as const, valueClassName: "whitespace-nowrap" };
 }
 
 function cumulativeFundingPresentation(presentation?: ArbitragePositionPresentation) {
@@ -969,11 +969,11 @@ function estimatedFundingPresentation(presentation?: ArbitragePositionPresentati
   return { value: compactDecimal(value, 8), unit: "USDT", tone: estimatedFundingTone(presentation), valueClassName: "whitespace-nowrap" };
 }
 
-function spreadPresentation(presentation: ArbitragePositionPresentation | undefined, quoteAsset: string) {
+function spreadPresentation(presentation: ArbitragePositionPresentation | undefined) {
   const value = presentation?.market.spreadQuotePerBase;
   const bps = presentation?.market.spreadBps;
   if (presentation?.market.quotedAt == null || value == null || bps == null) return { value: "--", detail: "数据更新中" };
-  return { value: `${bps.toFixed(2)} bps`, detail: `${value.toFixed(6)} ${quoteAsset} / base`, valueClassName: "whitespace-nowrap" };
+  return { value: `${bps.toFixed(2)} bps`, valueClassName: "whitespace-nowrap" };
 }
 
 function compactDecimal(value: string, maximumFractionDigits: number) {

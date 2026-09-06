@@ -139,7 +139,8 @@ test("arbitrage position card follows the three-level decision hierarchy without
   assert.match(defaultLayer, /资金费率套利[\s\S]*OKX 现货 → Binance 永续/u);
   assert.match(defaultLayer, /净资金费率[\s\S]*下次预计净资金费用[\s\S]*距下次结算[\s\S]*当前退出价差[\s\S]*管理规模[\s\S]*累计资金费收入/u);
   assert.doesNotMatch(defaultLayer, /当前退出状态/u);
-  assert.match(defaultLayer, /\+0\.0100%[\s\S]*0[\s\S]*USDT[\s\S]*60\.00 bps[\s\S]*6\.000000 USDT \/ base/u);
+  assert.match(defaultLayer, /\+0\.0100%[\s\S]*0[\s\S]*USDT[\s\S]*60\.00 bps[\s\S]*10[\s\S]*USDT/u);
+  assert.doesNotMatch(defaultLayer, /USDT \/ base|当前配对名义规模/u);
   assert.doesNotMatch(defaultLayer, /两腿数量差|管理数量|可安全退出数量|safeClosable/u);
   assert.match(html, /LONG LEG[\s\S]*多头腿[\s\S]*交易类型[\s\S]*现货[\s\S]*本腿资金费率[\s\S]*不适用[\s\S]*交易所实际数量[\s\S]*60.531381/u);
   assert.match(html, /SHORT LEG[\s\S]*空头腿[\s\S]*本腿资金费率[\s\S]*\+0\.0150% \/ 8h · 收入[\s\S]*交易所实际仓位/u);

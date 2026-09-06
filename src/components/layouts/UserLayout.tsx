@@ -128,7 +128,17 @@ export function UserLayout({ children }: UserLayoutProps) {
           </div>
         </header>
       </div>
-      <main className={isDashboard || isAccountPage || isTradingPage || isArbitragePage ? "min-w-0 w-full bg-[#080808] p-0" : "mx-auto min-w-0 max-w-[1480px] px-4 py-5 md:px-8 md:py-8"}>{children}</main>
+      <main
+        className={
+          isDashboard || isAccountPage || isTradingPage
+            ? "min-w-0 w-full bg-[#080808] p-0"
+            : isArbitragePage
+              ? "mx-auto min-w-0 w-full max-w-[1480px] bg-[#080808] px-4 py-5 md:px-8 md:py-7"
+              : "mx-auto min-w-0 max-w-[1480px] px-4 py-5 md:px-8 md:py-8"
+        }
+      >
+        {children}
+      </main>
     </div>
   );
 
