@@ -1,5 +1,6 @@
 import { requestJson } from "./httpClient";
 import type { ExchangeVenue } from "./exchangeCredentials";
+import { isLocalFixtureRuntime, localArbitrageFixture, localArbitragePresentation } from "./localArbitrageFixture";
 
 export type ArbitrageInstanceStatus =
   | "OPENING"
@@ -274,25 +275,30 @@ export type InstanceHedgeDelta = {
 };
 
 export async function fetchActiveArbitrageInstances(signal?: AbortSignal) {
+  if (isLocalFixtureRuntime()) return [localArbitrageFixture];
   const payload = await requestJson<unknown>(
     "/api/arbitrage-instances/active",
     "套利组合加载失败，请稍后重试",
     { userAuthFailure: true, init: { cache: "no-store", signal } },
   );
-  return instanceList(payload);
+  const instances = instanceList(payload);
+  return isLocalFixtureRuntime() && instances.length === 0 ? [localArbitrageFixture] : instances;
 }
 
 export async function fetchArbitragePositionPresentations(signal?: AbortSignal) {
+  if (isLocalFixtureRuntime()) return [localArbitragePresentation];
   const payload = await requestJson<unknown>(
     "/api/arbitrage-instances/presentation",
     "套利展示行情加载失败，请稍后重试",
     { userAuthFailure: true, init: { cache: "no-store", signal } },
   );
   if (!Array.isArray(payload)) throw invalidResponse();
-  return payload.map(positionPresentation);
+  const presentations = payload.map(positionPresentation);
+  return isLocalFixtureRuntime() && presentations.length === 0 ? [localArbitragePresentation] : presentations;
 }
 
 export async function fetchArbitrageInstanceHistory(page = 1, limit = 50, signal?: AbortSignal) {
+  if (isLocalFixtureRuntime()) return [];
   const payload = await requestJson<unknown>(
     `/api/arbitrage-instances/history?page=${page}&limit=${limit}`,
     "套利组合加载失败，请稍后重试",

@@ -28,8 +28,12 @@ const productionIdentity = {
   composeProject: "xingheng" as const,
 };
 
-test("health identity accepts only the exact production environment and Compose project pair", () => {
+test("health identity accepts exact production and local development pairs", () => {
   assert.deepEqual(parseRuntimeEnvironmentIdentity(productionIdentity), productionIdentity);
+  assert.deepEqual(
+    parseRuntimeEnvironmentIdentity({ deploymentEnvironment: "development", composeProject: "development" }),
+    { deploymentEnvironment: "development", composeProject: "development" },
+  );
 });
 
 test("health identity fails closed for missing, unknown and mismatched fields", () => {
@@ -38,7 +42,6 @@ test("health identity fails closed for missing, unknown and mismatched fields", 
     {},
     { deploymentEnvironment: "production" },
     { composeProject: "xingheng" },
-    { deploymentEnvironment: "development", composeProject: "development" },
     { deploymentEnvironment: "production", composeProject: "other-project" },
     { deploymentEnvironment: "staging", composeProject: "xingheng" },
     { deploymentEnvironment: "PRODUCTION", composeProject: "xingheng" },

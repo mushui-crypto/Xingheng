@@ -157,7 +157,17 @@ app.use(express.json({ limit: "64kb" }));
 
 const klineStore = new KlineStore();
 const market = new HyperliquidMarketService(klineStore);
-await market.start();
+try {
+  await market.start();
+} catch (error) {
+  if (config.isProduction) {
+    throw error;
+  }
+  console.warn(
+    "[market] Hyperliquid unavailable; continuing in local UI-only mode",
+    error instanceof Error ? error.message : error,
+  );
+}
 const strategyRuntime = new IctStrategyRuntime(market, klineStore);
 await strategyRuntime.start().catch((error) => {
   console.error("[strategy] ICT shadow runtime failed to start", error instanceof Error ? error.message : error);

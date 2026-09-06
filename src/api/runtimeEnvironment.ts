@@ -1,8 +1,8 @@
 import { requestJson } from "./httpClient";
 
 export type RuntimeEnvironmentIdentity = {
-  deploymentEnvironment: "production";
-  composeProject: "xingheng";
+  deploymentEnvironment: "production" | "development";
+  composeProject: "xingheng" | "development";
 };
 
 export class RuntimeEnvironmentValidationError extends Error {
@@ -37,7 +37,10 @@ export function parseRuntimeEnvironmentIdentity(payload: unknown): RuntimeEnviro
   const deploymentEnvironment = Reflect.get(payload, "deploymentEnvironment");
   const composeProject = Reflect.get(payload, "composeProject");
 
-  if (deploymentEnvironment === "production" && composeProject === "xingheng") {
+  if (
+    (deploymentEnvironment === "production" && composeProject === "xingheng")
+    || (deploymentEnvironment === "development" && composeProject === "development")
+  ) {
     return { deploymentEnvironment, composeProject };
   }
   throw new RuntimeEnvironmentValidationError();
