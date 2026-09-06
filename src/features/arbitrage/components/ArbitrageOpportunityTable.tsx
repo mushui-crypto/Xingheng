@@ -147,7 +147,7 @@ function LegFunding({ leg, side }: { leg: ArbitrageOpportunity["longLeg"]; side:
         <span>{formatFundingRate(leg.fundingRate)}</span>
         {leg.fundingIntervalHours ? <span>/ {formatInterval(leg.fundingIntervalHours)} 小时</span> : null}
       </div>
-      <p className="mt-1 font-sans text-muted">{fundingDirection(leg.fundingRate, side)}</p>
+      {side === "long" ? <p className="mt-1 font-sans text-muted">{fundingDirection(leg.fundingRate, side)}</p> : null}
       <p className="mt-1 whitespace-nowrap font-normal text-muted">当前 APR {formatApr(leg.currentFundingApr, true)}</p>
       <p className="mt-1.5 whitespace-nowrap font-normal">
         <FundingCountdown nextFundingTime={leg.nextFundingTime} />

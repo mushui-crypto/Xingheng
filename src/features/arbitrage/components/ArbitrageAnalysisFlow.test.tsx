@@ -86,6 +86,22 @@ test("dashboard opportunity table provides analysis navigation without inline de
   assert.doesNotMatch(html, /分析因子|评分构成|自动执行条件（旧规则）/u);
 });
 
+test("opportunity short funding keeps signed rates without payment direction copy", () => {
+  for (const fundingRate of [0.0001, -0.0001, 0, null]) {
+    const html = renderToStaticMarkup(
+      <ArbitrageOpportunityTable
+        opportunities={[{ ...opportunity, shortLeg: { ...opportunity.shortLeg, fundingRate } }]}
+        holdingDays={90}
+        yieldMetric="apr"
+        onAnalyze={() => undefined}
+      />,
+    );
+    assert.doesNotMatch(html, /空方收取|空方支付|方向待更新/u);
+    if (fundingRate === 0.0001) assert.match(html, /\+0\.0100%/);
+    if (fundingRate === -0.0001) assert.match(html, /-0\.0100%/);
+  }
+});
+
 test("analysis component renders dashboard metrics and keeps old automation rules secondary", () => {
   const html = renderToStaticMarkup(
     <ArbitrageOpportunityAnalysis
