@@ -1,144 +1,60 @@
-import { AlertTriangle, CheckCircle2, CircleOff } from "lucide-react";
 import { memo } from "react";
-import type { ArbitrageMarket } from "../model/types";
-import { formatApr, formatBps, formatFundingRate, formatPrice, formatRatio, formatUsd } from "../lib/formatters";
-import { ArbitrageHelp } from "./ArbitrageHelp";
-import { FundingCountdown } from "./FundingCountdown";
+import type { ArbitrageMarket, ArbitrageVenue } from "../model/types";
+import { formatFundingRate, formatPrice } from "../lib/formatters";
+
+const venues: Array<{ id: ArbitrageVenue; label: string; icon?: string }> = [
+  { id: "binance", label: "Binance", icon: "/assets/exchanges/binance.svg" },
+  { id: "okx", label: "OKX", icon: "/assets/exchanges/okx.svg" },
+  { id: "bybit", label: "Bybit", icon: "/assets/exchanges/bybit.svg" },
+  { id: "bitget", label: "Bitget", icon: "/assets/exchanges/bitget.svg" },
+];
 
 export const ArbitrageMarketTable = memo(function ArbitrageMarketTable({ markets }: { markets: ArbitrageMarket[] }) {
-  if (markets.length === 0) {
-    return <EmptyRows />;
+  const columns = venues;
+  const groups = new Map<string, ArbitrageMarket[]>();
+  for (const market of markets) {
+    if (!columns.some((venue) => venue.id === market.venue)) continue;
+    const key = `${market.asset}:${market.kind}:${market.quoteAsset}:${market.settlementAsset}`;
+    const group = groups.get(key) ?? [];
+    group.push(market);
+    groups.set(key, group);
   }
 
-  return (
-    <div className="w-full min-w-0 max-w-full overflow-x-auto border border-line bg-black [contain:paint]">
-      <table className="xh-table min-w-[1520px]">
-        <thead className="xh-thead">
-          <tr>
-            <th className="xh-th sticky left-0 z-10 bg-[#121212]">资产 / 市场</th>
-            <th className="xh-th">交易所</th>
-            <th className="xh-th">产品</th>
-            <th className="xh-th text-right"><HeaderLabel label="买一 / 卖一（Bid / Ask）" help="当前最优买价与最优卖价。" /></th>
-            <th className="xh-th text-right"><HeaderLabel label="标记价 / 指数价（Mark / Index）" help="永续合约标记价格与指数价格；现货市场两者均使用最新成交价。" /></th>
-            <th className="xh-th text-right"><HeaderLabel label="当前资金费率（Funding）" help="显示交易所最新一期原始资金费率、结算周期、估算APR和下次结算倒计时。正费率由多方支付给空方，负费率由空方支付给多方。" /></th>
-            <th className="xh-th text-right"><HeaderLabel label="近90天资金费率 APR" help="最近90天资金费率按日汇总后取平均并年化；覆盖率不足时可靠性会降低。" /></th>
-            <th className="xh-th text-right"><HeaderLabel label="正费率占比" help="最近90天资金费率样本中大于零的比例。" /></th>
-            <th className="xh-th text-right"><HeaderLabel label="盘口点差" help="当前最优买卖价差相对于中间价的bps。" /></th>
-            <th className="xh-th text-right"><HeaderLabel label="$10k 滑点" help="按当前订单簿模拟1万美元单向市价成交的价格冲击。" /></th>
-            <th className="xh-th text-right"><HeaderLabel label="双向深度" help="当前抓取档位内买卖盘可成交名义金额的较小值。" /></th>
-            <th className="xh-th">状态</th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-line">
-          {markets.map((market) => <MarketRow key={market.id} market={market} />)}
-        </tbody>
-      </table>
-    </div>
-  );
+  if (!groups.size) return <div className="border border-line bg-black px-5 py-14 text-center">
+    <p className="text-sm font-medium text-white">没有符合筛选条件的市场</p>
+    <p className="mt-2 text-xs text-muted">调整资产搜索条件后重试。</p>
+  </div>;
+
+  return <div className="w-full min-w-0 overflow-x-auto border border-line bg-black" role="region" aria-label="市场对比，可横向滚动查看全部交易所" tabIndex={0}>
+    <table className="xh-table min-w-[880px] table-fixed [&_th]:px-4 [&_th]:tracking-normal">
+      <colgroup><col className="w-[100px]" /><col className="w-[120px]" />{columns.map((venue) => <col key={venue.id} />)}</colgroup>
+      <thead className="xh-thead"><tr>
+        <th scope="col" className="xh-th">资产</th>
+        <th scope="col" className="xh-th">产品</th>
+        {columns.map((venue) => <th scope="col" className="xh-th" key={venue.id}><span className="inline-flex items-center gap-2">{venue.icon ? <img src={venue.icon} alt="" width={24} height={24} className={`h-6 w-6 shrink-0 object-contain ${venue.id === "okx" ? "invert" : ""}`} /> : null}{venue.label}</span></th>)}
+      </tr></thead>
+      <tbody className="divide-y divide-line">{[...groups].map(([key, group]) => {
+        const first = group[0];
+        return <tr key={key} className="hover:bg-white/[0.025]">
+          <th scope="row" className="px-4 py-5 text-left font-mono text-sm font-semibold text-white">{first.asset}</th>
+          <td className="px-4 py-5"><p className="text-sm text-white">{first.kind === "spot" ? "现货" : "永续"}</p><p className="mt-1 text-xs text-muted">{first.quoteAsset} 报价</p>{first.settlementAsset !== first.quoteAsset ? <p className="mt-1 text-xs text-muted">{first.settlementAsset} 结算</p> : null}</td>
+          {columns.map((venue) => {
+            const matches = group.filter((market) => market.venue === venue.id);
+            return <td key={venue.id} className="px-4 py-5 align-top">{matches.length ? <div className="space-y-3">{matches.map((market) => <MarketValues key={market.id} market={market} showSymbol={matches.length > 1} />)}</div> : <span className="text-muted" aria-label="暂无该市场">—</span>}</td>;
+          })}
+        </tr>;
+      })}</tbody>
+    </table>
+  </div>;
 });
 
-const MarketRow = memo(function MarketRow({ market }: { market: ArbitrageMarket }) {
-  return (
-    <tr className="hover:bg-white/[0.025]">
-      <td className="sticky left-0 z-[1] bg-black px-5 py-4">
-        <div className="flex items-center gap-3">
-          <span className="inline-flex h-8 min-w-12 items-center justify-center border border-white/15 bg-panel px-2 font-mono text-xs font-semibold text-white">
-            {market.asset}
-          </span>
-          <div className="min-w-0">
-            <p className="font-mono text-sm font-semibold text-white">{market.symbol}</p>
-            <p className="mt-1 text-xs text-dim">{market.quoteAsset} 报价 · {market.settlementAsset} 结算</p>
-          </div>
-        </div>
-      </td>
-      <td className="px-5 py-4 font-medium text-white">{market.venueLabel}</td>
-      <td className="px-5 py-4">
-        <ProductBadge kind={market.kind} />
-      </td>
-      <td className="px-5 py-4 text-right font-mono text-xs font-normal leading-5 text-muted">
-        <p>{formatPrice(market.bid)}</p>
-        <p>{formatPrice(market.ask)}</p>
-      </td>
-      <td className="px-5 py-4 text-right font-mono text-xs font-normal leading-5 text-muted">
-        <p>{formatPrice(market.markPrice)}</p>
-        <p>{formatPrice(market.indexPrice)}</p>
-      </td>
-      <td className="px-5 py-4 text-right">
-        <MarketFunding market={market} />
-      </td>
-      <td className="px-5 py-4 text-right font-mono font-normal text-muted">
-        {formatApr(market.historicalFundingApr, true)}
-        <p className="mt-1 text-[11px] font-normal text-dim">覆盖 {formatRatio(market.fundingCoverageRatio)}</p>
-      </td>
-      <td className="px-5 py-4 text-right font-mono font-normal text-muted">{formatRatio(market.fundingPositiveRatio)}</td>
-      <td className="px-5 py-4 text-right font-mono font-normal text-muted">{formatBps(market.spreadBps)}</td>
-      <td className="px-5 py-4 text-right font-mono font-normal text-muted">{formatBps(market.slippageBps10k)}</td>
-      <td className="px-5 py-4 text-right font-mono font-normal text-muted">{formatUsd(market.depthUsd)}</td>
-      <td className="px-5 py-4">
-        <MarketStatus market={market} />
-      </td>
-    </tr>
-  );
-});
-
-function MarketFunding({ market }: { market: ArbitrageMarket }) {
-  if (market.kind === "spot") {
-    return <span className="whitespace-nowrap text-xs font-normal text-dim">无资金费率</span>;
-  }
-  return (
-    <div className="min-w-[160px] font-mono tabular-nums">
-      <p className="whitespace-nowrap font-normal text-muted">
-        {formatFundingRate(market.fundingRate)}
-        {market.fundingIntervalHours ? <span> / {formatInterval(market.fundingIntervalHours)}h</span> : null}
-      </p>
-      <p className="mt-1 whitespace-nowrap text-[11px] font-normal text-muted">APR {formatApr(market.currentFundingApr, true)}</p>
-      <p className="mt-1 text-[11px] font-normal"><FundingCountdown nextFundingTime={market.nextFundingTime} /></p>
-    </div>
-  );
-}
-
-function ProductBadge({ kind }: { kind: ArbitrageMarket["kind"] }) {
-  return (
-    <span className={`inline-flex border px-2.5 py-1 text-xs font-medium ${kind === "spot" ? "border-sky-400/30 bg-sky-400/[0.08] text-sky-200" : "border-white/20 bg-panel2 text-slate-200"}`}>
-      {kind === "spot" ? "现货" : "永续"}
-    </span>
-  );
-}
-
-function MarketStatus({ market }: { market: ArbitrageMarket }) {
-  const config = market.status === "connected"
-    ? { icon: CheckCircle2, label: "正常", className: "text-emerald-300" }
-    : market.status === "degraded"
-      ? { icon: AlertTriangle, label: "受限", className: "text-amber-300" }
-      : { icon: CircleOff, label: "断开", className: "text-red-300" };
-  const Icon = config.icon;
-  return (
-    <span className={`inline-flex items-center gap-1.5 whitespace-nowrap text-xs font-medium ${config.className}`}>
-      <Icon aria-hidden="true" size={14} />
-      {config.label}
-      {market.warnings.length > 0 ? <ArbitrageHelp content={market.warnings.join("；")} label={`查看${config.label}状态说明`} /> : null}
-    </span>
-  );
-}
-
-function HeaderLabel({ label, help }: { label: string; help: string }) {
-  return (
-    <span className="flex items-center justify-end gap-1.5">
-      <span>{label}</span>
-      <ArbitrageHelp content={help} label={`查看${label}说明`} />
-    </span>
-  );
-}
-
-function EmptyRows() {
-  return (
-    <div className="border border-line bg-black px-5 py-14 text-center">
-      <p className="text-sm font-medium text-white">没有符合筛选条件的市场</p>
-      <p className="mt-2 text-xs text-muted">调整资产或交易所筛选条件后重试。</p>
-    </div>
-  );
-}
-
-function formatInterval(hours: number) {
-  return Number.isInteger(hours) ? String(hours) : hours.toFixed(1);
+function MarketValues({ market, showSymbol }: { market: ArbitrageMarket; showSymbol: boolean }) {
+  const available = market.status !== "disconnected";
+  const price = available && market.markPrice !== null && Number.isFinite(market.markPrice) && market.markPrice > 0 ? market.markPrice : null;
+  const funding = available && market.fundingRate !== null && Number.isFinite(market.fundingRate) ? market.fundingRate : null;
+  return <div className="min-w-0 text-xs leading-5">
+    {showSymbol ? <p className="break-all font-mono text-muted">{market.symbol}</p> : null}
+    <div className="flex flex-wrap items-baseline gap-x-2"><span className="text-muted">资金费率</span><span className="font-mono text-white">{market.kind === "spot" ? "不适用" : funding === null ? "—" : formatFundingRate(funding)}</span>{market.kind === "perpetual" && funding !== null && market.fundingIntervalHours !== null && market.fundingIntervalHours > 0 ? <span className="text-muted">/ {market.fundingIntervalHours}h</span> : null}</div>
+    <div className="mt-2 flex flex-wrap items-baseline gap-x-2"><span className="text-muted">当前价格</span><span className="font-mono text-white">{price === null ? "—" : formatPrice(price)}</span>{price !== null ? <span className="text-muted">{market.quoteAsset}</span> : null}</div>
+  </div>;
 }

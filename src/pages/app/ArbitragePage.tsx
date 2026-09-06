@@ -4,6 +4,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { fetchArbitrageDashboard } from "../../api/arbitrage";
 import { HttpRequestError } from "../../api/httpClient";
 import { DropdownSelect } from "../../components/ui/DropdownSelect";
+import { ArbitrageAssetPicker } from "../../features/arbitrage/components/ArbitrageAssetPicker";
 import { ArbitrageMarketTable } from "../../features/arbitrage/components/ArbitrageMarketTable";
 import { ArbitrageOpportunityTable } from "../../features/arbitrage/components/ArbitrageOpportunityTable";
 import { ArbitrageHelp } from "../../features/arbitrage/components/ArbitrageHelp";
@@ -102,7 +103,6 @@ export function ArbitragePage() {
   const [entryStatus, setEntryStatus] = useState<EntryStatusFilter>("all");
   const [longVenue, setLongVenue] = useState<VenueFilter>("all");
   const [shortVenue, setShortVenue] = useState<VenueFilter>("all");
-  const [marketVenue, setMarketVenue] = useState<VenueFilter>("all");
   const [snapshot, setSnapshot] = useState<ArbitrageDashboardSnapshot | null>(null);
   const [opportunityPage, setOpportunityPage] = useState(1);
   const [loading, setLoading] = useState(true);
@@ -117,13 +117,14 @@ export function ArbitragePage() {
     };
   }, []);
 
-  const assetOptions = useMemo<Array<{ value: AssetFilter; label: string }>>(() => {
-    const available = new Set(snapshot?.markets.map((market) => market.asset) ?? ARBITRAGE_ASSET_ORDER);
-    return [
-      { value: "all", label: "全部资产" },
-      ...ARBITRAGE_ASSET_ORDER.filter((value) => available.has(value)).map((value) => ({ value, label: value })),
-    ];
-  }, [snapshot]);
+  const availableAssets = useMemo(() => {
+    const available = new Set(snapshot?.markets.filter((market) => view !== "markets" || market.venue !== "tradexyz").map((market) => market.asset) ?? ARBITRAGE_ASSET_ORDER.filter((asset) => view !== "markets" || asset !== "GOLD"));
+    return ARBITRAGE_ASSET_ORDER.filter((value) => available.has(value));
+  }, [snapshot, view]);
+
+  useEffect(() => {
+    if (view === "markets" && asset !== "all" && !availableAssets.includes(asset)) setAsset("all");
+  }, [asset, availableAssets, view]);
 
   const longVenueOptions = useMemo(() => filterVenueOptions(
     "做多-全部交易所",
@@ -134,10 +135,6 @@ export function ArbitragePage() {
     "做空-全部交易所",
     snapshot ? opportunityLegVenues(snapshot.opportunities, "short") : null,
     "做空",
-  ), [snapshot]);
-  const marketVenueOptions = useMemo(() => filterVenueOptions(
-    "全部交易所",
-    snapshot ? new Set(snapshot.markets.map((market) => market.venue)) : null,
   ), [snapshot]);
 
   const load = useCallback(async (forceRefresh = false) => {
@@ -172,14 +169,14 @@ export function ArbitragePage() {
   const filteredMarkets = useMemo(() => {
     if (!snapshot) return [];
     return snapshot.markets
+      .filter((market) => market.venue !== "tradexyz")
       .filter((market) => asset === "all" || market.asset === asset)
-      .filter((market) => marketVenue === "all" || market.venue === marketVenue)
       .sort((left, right) =>
         (assetRank.get(left.asset) ?? 99) - (assetRank.get(right.asset) ?? 99)
         || left.venueLabel.localeCompare(right.venueLabel)
         || left.kind.localeCompare(right.kind),
       );
-  }, [asset, marketVenue, snapshot]);
+  }, [asset, snapshot]);
 
   const filteredOpportunities = useMemo(() => {
     if (!snapshot) return [];
@@ -223,20 +220,19 @@ export function ArbitragePage() {
 
   useEffect(() => {
     setOpportunityPage(1);
-  }, [asset, entryStatus, horizonDays, longVenue, marketVenue, productType, recommendation, shortVenue, sort, yieldMetric]);
+  }, [asset, entryStatus, horizonDays, longVenue, productType, recommendation, shortVenue, sort, yieldMetric]);
 
   useEffect(() => {
     if (!longVenueOptions.some((option) => option.value === longVenue)) setLongVenue("all");
     if (!shortVenueOptions.some((option) => option.value === shortVenue)) setShortVenue("all");
-    if (!marketVenueOptions.some((option) => option.value === marketVenue)) setMarketVenue("all");
-  }, [longVenue, longVenueOptions, marketVenue, marketVenueOptions, shortVenue, shortVenueOptions]);
+  }, [longVenue, longVenueOptions, shortVenue, shortVenueOptions]);
 
   useEffect(() => {
     if (opportunityPage > opportunityPageCount) setOpportunityPage(opportunityPageCount);
   }, [opportunityPage, opportunityPageCount]);
 
   return (
-    <div className="xh-page w-full min-w-0 max-w-full px-4 py-5 md:px-8 md:py-7">
+    <div className="xh-page w-full min-w-0 max-w-full">
       <header className="xh-page-header">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-3">
@@ -284,101 +280,92 @@ export function ArbitragePage() {
       ) : null}
 
       <section className="w-full min-w-0 max-w-full space-y-4">
-        <div className="flex flex-col gap-3 border-y border-line py-3 xl:flex-row xl:items-center xl:justify-between">
-          <div className="flex min-w-0 flex-wrap items-center gap-2">
-            <SegmentedControl
-              value={view}
-              options={[{ value: "opportunities", label: "套利机会" }, { value: "markets", label: "市场对比" }]}
-              onChange={(value) => setView(value as BoardView)}
-              label="看板视图"
-            />
-            <DropdownSelect
-              className="w-[132px]"
-              value={asset}
-              options={assetOptions}
-              onChange={setAsset}
-              label="筛选资产"
-            />
+        <div className="flex flex-col gap-3 border-y border-line py-3">
+          <div className="flex min-w-0 flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <SegmentedControl
+                value={view}
+                options={[{ value: "opportunities", label: "套利机会" }, { value: "markets", label: "市场对比" }]}
+                onChange={(value) => setView(value as BoardView)}
+                label="看板视图"
+              />
+              <div className="w-[200px] max-w-full">
+                <ArbitrageAssetPicker value={asset} assets={availableAssets} onChange={setAsset} />
+              </div>
+            </div>
             {view === "opportunities" ? (
-              <>
+            <div className="grid min-w-0 grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center sm:justify-end">
                 <DropdownSelect
-                  className="w-[152px]"
+                  className="col-span-2 min-w-0 w-full sm:w-[200px]"
+                  value={sort}
+                  options={[{ value: "score", label: "综合质量优先" }, { value: "netApr", label: `估算净${yieldMetric.toUpperCase()}优先` }]}
+                  onChange={(value) => setSort(value as OpportunitySort)}
+                  label="机会排序"
+                />
+              <DropdownSelect
+                className="min-w-0 w-full sm:w-[128px]"
+                value={yieldMetric}
+                options={[{ value: "apr", label: "APR" }, { value: "apy", label: "APY" }]}
+                onChange={(value) => setYieldMetric(value as ArbitrageYieldMetric)}
+                label="收益指标"
+              />
+              <DropdownSelect
+                className="min-w-0 w-full sm:w-[164px]"
+                value={String(horizonDays)}
+                options={horizons.map((value) => ({ value: String(value), label: `持有 ${value} 天` }))}
+                onChange={(value) => setHorizonDays(Number(value) as ArbitrageHorizon)}
+                label="持有测算情景"
+              />
+            </div>
+            ) : null}
+          </div>
+          {view === "opportunities" ? <div className="grid min-w-0 grid-cols-[repeat(auto-fit,minmax(min(100%,190px),1fr))] gap-2">
+                <DropdownSelect
+                  className="min-w-0 w-full"
                   value={productType}
                   options={productTypeOptions}
                   onChange={setProductType}
                   label="筛选套利类型"
                 />
                 <DropdownSelect
-                  className="w-[172px]"
+                  className="min-w-0 w-full"
                   value={recommendation}
                   options={recommendationOptions}
                   onChange={setRecommendation}
                   label="筛选综合质量"
                 />
                 <DropdownSelect
-                  className="w-[166px]"
+                  className="min-w-0 w-full"
                   value={entryStatus}
                   options={entryStatusOptions}
                   onChange={setEntryStatus}
                   label="筛选当前条件状态"
                 />
                 <DropdownSelect
-                  className="w-[164px]"
+                  className="min-w-0 w-full"
                   value={longVenue}
                   options={longVenueOptions}
                   onChange={setLongVenue}
                   label="筛选做多交易所"
                 />
                 <DropdownSelect
-                  className="w-[164px]"
+                  className="min-w-0 w-full"
                   value={shortVenue}
                   options={shortVenueOptions}
                   onChange={setShortVenue}
                   label="筛选做空交易所"
                 />
-              </>
-            ) : (
-              <DropdownSelect
-                className="w-[148px]"
-                value={marketVenue}
-                options={marketVenueOptions}
-                onChange={setMarketVenue}
-                label="筛选市场交易所"
-              />
-            )}
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            {view === "opportunities" ? (
-              <SegmentedControl
-                value={sort}
-                options={[{ value: "score", label: "综合质量优先" }, { value: "netApr", label: `估算净${yieldMetric.toUpperCase()}优先` }]}
-                onChange={(value) => setSort(value as OpportunitySort)}
-                label="机会排序"
-              />
-            ) : null}
-            <SegmentedControl
-              value={yieldMetric}
-              options={[{ value: "apr", label: "APR" }, { value: "apy", label: "APY" }]}
-              onChange={(value) => setYieldMetric(value as ArbitrageYieldMetric)}
-              label="收益指标"
-            />
-            <SegmentedControl
-              value={String(horizonDays)}
-              options={horizons.map((value) => ({ value: String(value), label: `${value}天` }))}
-              onChange={(value) => setHorizonDays(Number(value) as ArbitrageHorizon)}
-              label="持有测算情景"
-            />
-          </div>
+          </div> : null}
         </div>
 
         <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-muted">
           <p>{view === "opportunities"
             ? opportunityCountLabel(filteredOpportunities.length, productType, recommendation, entryStatus, longVenue, shortVenue)
             : `${filteredMarkets.length} 个市场`}</p>
-          <div className="flex items-center gap-1.5">
+          {view === "opportunities" ? <div className="flex items-center gap-1.5">
             <span>近90天费率基准 · {horizonDays}天持有测算情景</span>
             <ArbitrageHelp content={`历史资金费率固定观察最近90天；${horizonDays}天仅用于持有测算和往返成本摊销。按Taker成交，并分别计量USDT与USDC。`} label="查看测算口径" />
-          </div>
+          </div> : <p>当前资金费率 · 当前价格（标记价 / 最新成交价）</p>}
         </div>
 
         {loading && !snapshot ? (

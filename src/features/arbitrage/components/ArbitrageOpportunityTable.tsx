@@ -1,7 +1,7 @@
 import { BarChart3 } from "lucide-react";
 import { memo } from "react";
 import type { ArbitrageOpportunity, ArbitrageYieldMetric } from "../model/types";
-import { equivalentNetYield, formatApr, formatBps, formatFundingRate, formatUsd } from "../lib/formatters";
+import { equivalentNetYield, formatApr, formatFundingRate } from "../lib/formatters";
 import { ArbitrageHelp } from "./ArbitrageHelp";
 import { FundingCountdown } from "./FundingCountdown";
 
@@ -23,20 +23,17 @@ export const ArbitrageOpportunityTable = memo(function ArbitrageOpportunityTable
   }
 
   return (
-    <div className="w-full min-w-0 max-w-full overflow-x-auto border border-line bg-black [contain:paint]">
-      <table className="xh-table min-w-[1730px] table-fixed">
+    <div className="w-full min-w-0 max-w-full overflow-x-auto border border-line bg-black" role="region" aria-label="套利机会，可横向滚动查看全部列" tabIndex={0}>
+      <table className="xh-table min-w-[1120px] table-fixed [&_th]:px-3 [&_th]:tracking-normal [&_td]:px-3">
         <colgroup>
-          <col className="w-[180px]" />
-          <col className="w-[260px]" />
-          <col className="w-[260px]" />
-          <col className="w-[140px]" />
-          <col className="w-[140px]" />
-          <col className="w-[150px]" />
-          <col className="w-[140px]" />
-          <col className="w-[115px]" />
-          <col className="w-[115px]" />
-          <col className="w-[120px]" />
-          <col className="w-[114px]" />
+          <col className="w-[14%]" />
+          <col className="w-[18.5%]" />
+          <col className="w-[18.5%]" />
+          <col className="w-[11%]" />
+          <col className="w-[9%]" />
+          <col className="w-[10%]" />
+          <col className="w-[8%]" />
+          <col className="w-[11%]" />
         </colgroup>
         <thead className="xh-thead">
           <tr>
@@ -47,9 +44,6 @@ export const ArbitrageOpportunityTable = memo(function ArbitrageOpportunityTable
             <th className="xh-th text-center"><HeaderLabel label="当前费率差" help="按两腿最新资金费率折算的年化毛收益差，未扣除交易成本。" /></th>
             <th className="xh-th text-center"><HeaderLabel label="近90天费率差" help="两腿最近90天逐日对齐后的平均资金费率差，再按365天年化；未扣除交易成本。" /></th>
             <th className="xh-th text-center"><HeaderLabel label={`估算净 ${yieldMetric.toUpperCase()}`} help={yieldMetric === "apr" ? `近90天费率差扣除按${holdingDays}天持有测算情景摊销的往返费用与1万美元档滑点后年化。` : `由估算净APR按${holdingDays}天再投资周期假设复利换算；不代表实际可持续复投收益。`} /></th>
-            <th className="xh-th text-center"><HeaderLabel label="往返成本" help="两腿开仓和平仓的吃单（Taker）手续费，加上按1万美元订单簿深度估算的双向滑点。" /></th>
-            <th className="xh-th text-center"><HeaderLabel label="入场基差" help="做空腿买一价（Bid）与做多腿卖一价（Ask）之间的即时价格差，以两者中间价折算为bps；正值通常更有利。" /></th>
-            <th className="xh-th text-center"><HeaderLabel label="容量" help="两腿订单簿可用美元深度的较小值，仅作流动性参考，不等于保证成交规模。" /></th>
             <th className="xh-th text-center"><span className="sr-only">详情</span></th>
           </tr>
         </thead>
@@ -102,11 +96,6 @@ const OpportunityRow = memo(function OpportunityRow({ opportunity, holdingDays, 
       <td className={`px-5 py-4 text-center font-mono font-semibold ${(displayedYield ?? 0) > 0 ? "text-white" : "text-red-300"}`}>
         {formatApr(displayedYield, true)}
       </td>
-      <td className="px-5 py-4 text-center font-mono font-normal text-muted">
-        {formatBps(opportunity.roundTripCostBps)}
-      </td>
-      <td className="px-5 py-4 text-center font-mono font-normal text-muted">{formatBps(opportunity.entryBasisBps, true)}</td>
-      <td className="px-5 py-4 text-center font-mono font-normal text-muted">{formatUsd(opportunity.capacityUsd)}</td>
       <td className="px-3 py-4 text-center">
         <button
           type="button"
@@ -117,7 +106,7 @@ const OpportunityRow = memo(function OpportunityRow({ opportunity, holdingDays, 
             onAnalyze(opportunity);
           }}
         >
-          <BarChart3 aria-hidden="true" size={14} /> 查看分析
+          <BarChart3 aria-hidden="true" size={14} className="shrink-0" /> 查看分析
         </button>
       </td>
     </tr>
@@ -135,14 +124,15 @@ function HeaderLabel({ label, help, align = "center" }: { label: string; help: s
 
 function Leg({ leg, side }: { leg: ArbitrageOpportunity["longLeg"]; side: "long" | "short" }) {
   return (
-    <div className="min-w-0 overflow-hidden">
+    <div className="min-w-0">
       <div className="flex items-center gap-2">
         <span className={`text-xs font-semibold ${side === "long" ? "text-emerald-300" : "text-red-300"}`}>{side === "long" ? "多" : "空"}</span>
-        <span className="font-mono text-sm font-semibold text-white">{leg.asset}</span>
+        <span className="min-w-0 break-words font-mono text-sm font-semibold text-white">{leg.asset}</span>
       </div>
-      <p className="mt-1 truncate text-xs text-muted">
-        {leg.venueLabel} · <span className="font-mono">{leg.symbol}</span> · {leg.kind === "spot" ? "现货" : "永续"}
-      </p>
+      <div className="mt-1 text-xs leading-5 text-muted">
+        <p>{leg.venueLabel} · {leg.kind === "spot" ? "现货" : "永续"}</p>
+        <p className="break-all font-mono">{leg.symbol}</p>
+      </div>
       <LegFunding leg={leg} side={side} />
     </div>
   );
@@ -151,12 +141,13 @@ function Leg({ leg, side }: { leg: ArbitrageOpportunity["longLeg"]; side: "long"
 function LegFunding({ leg, side }: { leg: ArbitrageOpportunity["longLeg"]; side: "long" | "short" }) {
   if (leg.kind === "spot") return <p className="mt-1.5 whitespace-nowrap text-xs font-normal text-dim">无资金费率</p>;
   return (
-    <div className="mt-1.5 min-w-[210px] font-mono text-xs tabular-nums">
-      <p className="whitespace-nowrap font-normal text-muted">
-        资金费率（Funding） {formatFundingRate(leg.fundingRate)}
-        {leg.fundingIntervalHours ? ` / ${formatInterval(leg.fundingIntervalHours)} 小时` : ""}
-        <span className="font-sans"> · {fundingDirection(leg.fundingRate, side)}</span>
-      </p>
+    <div className="mt-1.5 min-w-0 font-mono text-xs tabular-nums">
+      <div className="flex flex-wrap gap-x-1 gap-y-1 font-normal text-muted">
+        <span className="font-sans">资金费率</span>
+        <span>{formatFundingRate(leg.fundingRate)}</span>
+        {leg.fundingIntervalHours ? <span>/ {formatInterval(leg.fundingIntervalHours)} 小时</span> : null}
+      </div>
+      <p className="mt-1 font-sans text-muted">{fundingDirection(leg.fundingRate, side)}</p>
       <p className="mt-1 whitespace-nowrap font-normal text-muted">当前 APR {formatApr(leg.currentFundingApr, true)}</p>
       <p className="mt-1.5 whitespace-nowrap font-normal">
         <FundingCountdown nextFundingTime={leg.nextFundingTime} />

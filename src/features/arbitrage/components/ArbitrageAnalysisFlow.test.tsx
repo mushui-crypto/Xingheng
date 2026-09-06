@@ -80,7 +80,9 @@ test("dashboard opportunity table provides analysis navigation without inline de
   assert.match(html, /查看分析/);
   assert.match(html, /tabindex="0"/);
   assert.match(html, /aria-label="查看 BTCUSDT 与 BTC-USDT-SWAP 套利分析"/);
-  assert.match(html, /资金费率（Funding）/);
+  assert.match(html, /资金费率/);
+  assert.equal((html.match(/<th /g) ?? []).length, 8);
+  assert.doesNotMatch(html, /查看往返成本说明|查看入场基差说明|查看容量说明/u);
   assert.doesNotMatch(html, /分析因子|评分构成|自动执行条件（旧规则）/u);
 });
 
