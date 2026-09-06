@@ -918,7 +918,8 @@ function fundingRatePresentation(presentation?: ArbitragePositionPresentation) {
   const fundingRate = presentation?.market.netFundingRate8h ?? presentation?.market.fundingRate;
   if (fundingRate == null) return { value: "--", detail: "数据更新中" };
   return {
-    value: `${fundingRate >= 0 ? "+" : ""}${(fundingRate * 100).toFixed(4)}%`,
+    value: `${fundingRate >= 0 ? "+" : ""}${(fundingRate * 100).toFixed(4)}`,
+    unit: "%",
     valueClassName: "whitespace-nowrap",
   };
 }
@@ -942,8 +943,13 @@ function managedScalePresentation(presentation?: ArbitragePositionPresentation) 
 function cumulativeFundingPresentation(presentation?: ArbitragePositionPresentation) {
   const revenue = presentation?.revenue;
   if (revenue === undefined) return { value: "--", detail: "数据更新中", tone: "neutral" as const };
+  if (revenue.cumulativeFundingIncomeCompleteness !== "COMPLETE" || revenue.cumulativeFundingIncome === null) {
+    return { value: "暂无可靠数据", tone: "neutral" as const };
+  }
+  const value = revenue.cumulativeFundingIncome;
   return {
-    value: revenueValue(revenue.cumulativeFundingIncome, revenue.cumulativeFundingIncomeCompleteness),
+    value: `${value.startsWith("-") || value === "0" ? "" : "+"}${value}`,
+    unit: "USDT",
     tone: "neutral" as const,
     valueClassName: "whitespace-nowrap",
   };
@@ -973,7 +979,7 @@ function spreadPresentation(presentation: ArbitragePositionPresentation | undefi
   const value = presentation?.market.spreadQuotePerBase;
   const bps = presentation?.market.spreadBps;
   if (presentation?.market.quotedAt == null || value == null || bps == null) return { value: "--", detail: "数据更新中" };
-  return { value: `${bps.toFixed(2)} bps`, valueClassName: "whitespace-nowrap" };
+  return { value: bps.toFixed(2), unit: "bps", valueClassName: "whitespace-nowrap" };
 }
 
 function compactDecimal(value: string, maximumFractionDigits: number) {

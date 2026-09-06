@@ -139,7 +139,10 @@ test("arbitrage position card follows the three-level decision hierarchy without
   assert.match(defaultLayer, /资金费率套利[\s\S]*OKX 现货 → Binance 永续/u);
   assert.match(defaultLayer, /净资金费率[\s\S]*下次预计净资金费用[\s\S]*距下次结算[\s\S]*当前退出价差[\s\S]*管理规模[\s\S]*累计资金费收入/u);
   assert.doesNotMatch(defaultLayer, /当前退出状态/u);
-  assert.match(defaultLayer, /\+0\.0100%[\s\S]*0[\s\S]*USDT[\s\S]*60\.00 bps[\s\S]*10[\s\S]*USDT/u);
+  assert.match(defaultLayer, /\+0\.0100<span class="[^"]*text-\[12px\][^"]*">%<\/span>/u);
+  assert.match(defaultLayer, />0<span class="[^"]*text-\[12px\][^"]*">USDT<\/span>/u);
+  assert.match(defaultLayer, /60\.00<span class="[^"]*text-\[12px\][^"]*">bps<\/span>/u);
+  assert.match(defaultLayer, />10<span class="[^"]*text-\[12px\][^"]*">USDT<\/span>/u);
   assert.doesNotMatch(defaultLayer, /USDT \/ base|当前配对名义规模/u);
   assert.doesNotMatch(defaultLayer, /两腿数量差|管理数量|可安全退出数量|safeClosable/u);
   assert.match(html, /LONG LEG[\s\S]*多头腿[\s\S]*交易类型[\s\S]*现货[\s\S]*本腿资金费率[\s\S]*不适用[\s\S]*交易所实际数量[\s\S]*60.531381/u);
@@ -272,7 +275,7 @@ test("presentation progressively enriches an already rendered core card", () => 
   assert.equal(ready.status, "success");
   if (ready.status === "success") assert.equal(ready.presentationStatus, "success");
   assert.match(html, /XAUT \/ USDT/u);
-  assert.match(html, /\+0\.0100%[\s\S]*60\.00 bps/u);
+  assert.match(html, /\+0\.0100<span class="[^"]*text-\[12px\][^"]*">%<\/span>[\s\S]*60\.00<span class="[^"]*text-\[12px\][^"]*">bps<\/span>/u);
 });
 
 test("presentation failure stays isolated from active and history core data", () => {
@@ -412,7 +415,7 @@ test("first-level shows cumulative funding income while the third-level field re
   />);
   const defaultLayer = html.slice(html.indexOf("资金费率套利"), html.indexOf("hidden=\"\""));
 
-  assert.match(defaultLayer, /累计资金费收入[\s\S]*\+0\.0125 USDT/u);
+  assert.match(defaultLayer, /累计资金费收入[\s\S]*\+0\.0125<span class="[^"]*text-\[12px\][^"]*">USDT<\/span>/u);
   assert.doesNotMatch(defaultLayer, /当前退出状态/u);
   assert.equal((html.match(/累计资金费收入/gu) ?? []).length, 2);
 });
