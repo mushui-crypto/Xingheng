@@ -9,12 +9,20 @@
 
 - 部署必须绑定一个已提交的 commit SHA。
 - 镜像 tag 必须使用完整 commit SHA，不以 `latest` 作为唯一依据。
-- 部署前必须确认工作区 clean。
+- 必须从隔离、干净源码构建；无关本地修改不得进入 release archive。
 - 部署可以由用户明确授权后执行。
 - 部署不等于真实交易授权。
 - 部署流程不得自动打开 `LIVE_TRADING_ENABLED`。
 - 部署流程不得自动关闭 `BINANCE_KILL_SWITCH`。
 - 部署流程不得自动执行 funding cycle、repair、retry、residual close 或 provider mutation。
+
+### NORMAL PRODUCTION RELEASE
+
+- 正常生产部署允许 trading flags 保持当前生产状态，不要求为了发布关闭 live trading 或开启任一 venue kill switch。
+- 不得因部署自动改变交易开关；live trading / kill switch 继续用于事故处理、人工暂停交易和风险控制，运行语义不变。
+- 如果部署前发现明确正在进行的异常 execution、UNKNOWN recovery 或 Provider mutation，可人工延后发布。
+- 已由人工判定过期的历史测试实例和 orphan UNKNOWN 不作为正常发布 blocker。不得为发布修改其记录、伪造状态、清理历史或新增封存机制。
+- 固定 commit SHA，禁止 `compose down`；API/WEB 更新后必须 health check，并只读验收，不主动触发交易。
 
 ## 2. 提交检查
 
@@ -29,7 +37,7 @@ git diff --check
 
 要求：
 
-- `git status` 必须 clean。
+- 发布源码必须 clean；原开发工作区可以保留已明确排除的无关修改。
 - commit SHA 必须与计划部署版本一致。
 - 不允许把 `.env.production`、secret、SQLite、receipt、日志或 build artifact 纳入提交。
 
@@ -71,8 +79,6 @@ CORS_ALLOWED_ORIGINS=https://<domain>
 TRADING_DB_PATH=/app/data/trading.sqlite
 BINANCE_USER_ORDER_DB_DIR=/app/data/binance-users
 BINANCE_TRADING_DB_PATH=/app/data/binance-personal.sqlite
-LIVE_TRADING_ENABLED=false
-BINANCE_KILL_SWITCH=true
 GCP_KMS_CREDENTIAL_KEY_NAME=<full CryptoKey resource name>
 GOOGLE_ADC_DIR=<host adc directory>
 ```
@@ -84,6 +90,7 @@ GOOGLE_ADC_DIR=<host adc directory>
 - `/backups` 必须是持久 volume。
 - Binance API key 禁止提现权限。
 - KMS/ADC 缺失时应 fail closed。
+- 各 venue live trading / kill switch 保持部署前的准确生产状态，不规定必须关闭交易。
 
 ## 5. Compose 检查
 
@@ -102,8 +109,7 @@ docker compose -p xingheng \
 - `sqlite_data` 挂载到 `/app/data`。
 - `sqlite_backups` 挂载到 `/backups`。
 - `GOOGLE_ADC_DIR` 只读挂载到 `/run/secrets/gcp-wif`。
-- `LIVE_TRADING_ENABLED=false`。
-- `BINANCE_KILL_SWITCH=true`。
+- 各 venue trading flags 与部署前生产状态一致。
 
 ## 6. 部署
 
@@ -175,18 +181,13 @@ docker compose -p xingheng \
 scripts/restore.sh stellax-YYYYMMDDTHHMMSSZ
 ```
 
-回滚期间必须保持：
-
-```text
-LIVE_TRADING_ENABLED=false
-BINANCE_KILL_SWITCH=true
-```
+正常版本回滚不要求强制切换 trading flags。若因事故处理已人工关闭交易，回滚必须保持关闭，不得自动恢复。风险开关的启停属于独立人工风险决策。
 
 回滚不得自动 retry、resubmit、reopen position 或 residual close。
 
-## 9. 真实资金激活
+## 9. 首次真实资金激活与独立风险控制
 
-真实资金激活不是部署的一部分。
+首次真实资金激活不是部署的一部分。以下首次激活检查不作为已正式运行系统的日常发布前置条件。
 
 首次真实资金前必须人工确认：
 
@@ -203,7 +204,7 @@ LIVE_TRADING_ENABLED=true
 BINANCE_KILL_SWITCH=false
 ```
 
-完成小额验证后，应恢复：
+仅限人工受控的小额测试窗口，按该次测试授权恢复风险开关；正常生产发布不自动执行以下操作：
 
 ```text
 BINANCE_KILL_SWITCH=true
