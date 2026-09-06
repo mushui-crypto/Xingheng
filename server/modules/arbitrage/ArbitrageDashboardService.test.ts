@@ -495,11 +495,23 @@ describe("ArbitrageDashboardService cache and refresh control", () => {
       const providerRequestCount = requestedUrls.length;
       const yearlySnapshot = await service.getSnapshot(365);
 
-      assert.equal(snapshot.markets.length, 90);
-      assert.equal(yearlySnapshot.markets.length, 90);
+      assert.equal(snapshot.markets.length, 163);
+      assert.equal(yearlySnapshot.markets.length, 163);
       assert.equal(yearlySnapshot.generatedAt, snapshot.generatedAt);
       assert.equal(requestedUrls.length, providerRequestCount);
-      assert.equal(snapshot.summary.trackedMarketCount, 90);
+      assert.equal(snapshot.summary.trackedMarketCount, 163);
+      const equities = ["AAPL", "AMZN", "META", "COIN", "PLTR", "MSTR", "HOOD", "INTC", "AVGO", "ORCL", "NFLX", "CRM", "WMT", "CRCL", "SNDK", "QCOM"];
+      for (const asset of [...equities, "UBER", "JPM", "V"]) {
+        const legs = snapshot.markets.filter((market) => market.asset === asset);
+        const expectedVenueCount = equities.includes(asset) ? 4 : 3;
+        assert.equal(legs.length, expectedVenueCount);
+        assert.ok(legs.every((leg) => leg.kind === "perpetual" && leg.status !== "disconnected"));
+        assert.ok(legs.every((leg) => leg.quoteAsset === "USDT" && leg.settlementAsset === "USDT"));
+        const pairs = snapshot.opportunities.filter((item) => item.longLeg.asset === asset);
+        assert.equal(pairs.length, expectedVenueCount * (expectedVenueCount - 1));
+        assert.ok(pairs.every((item) => item.shortLeg.asset === asset && item.matchLabel === "指数源差异"));
+      }
+      assert.ok(!snapshot.markets.some((market) => ["QQQ", "SPY", "SOXL", "OPENAI", "AMDSTOCK"].includes(market.asset)));
       for (const asset of ["BTC", "ETH", "SOL", "XRP", "DOGE"] as const) {
         assert.equal(snapshot.markets.filter((market) => market.asset === asset).length, 8);
         assert.equal(snapshot.opportunities.filter((opportunity) =>
@@ -575,7 +587,7 @@ describe("ArbitrageDashboardService orderbook cache", () => {
 
       await service.getSnapshot(90);
       const cache = (service as unknown as { orderbooks: Map<string, unknown> }).orderbooks;
-      assert.equal(cache.size, 90);
+      assert.equal(cache.size, 163);
       cache.clear();
       requests.length = 0;
 
@@ -591,9 +603,9 @@ describe("ArbitrageDashboardService orderbook cache", () => {
       await service.getSnapshot(365, true);
       const forced = classifyProviderRequests(requests);
 
-      assert.deepEqual(cold, { tickerCurrent: 23, orderbook: 90, other: 0, total: 113 });
-      assert.deepEqual(cached, { tickerCurrent: 23, orderbook: 0, other: 0, total: 23 });
-      assert.deepEqual(forced, { tickerCurrent: 23, orderbook: 90, other: 0, total: 113 });
+      assert.deepEqual(cold, { tickerCurrent: 39, orderbook: 163, other: 0, total: 202 });
+      assert.deepEqual(cached, { tickerCurrent: 39, orderbook: 0, other: 0, total: 39 });
+      assert.deepEqual(forced, { tickerCurrent: 39, orderbook: 163, other: 0, total: 202 });
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -617,7 +629,7 @@ describe("ArbitrageDashboardService orderbook cache", () => {
       now += 2;
       await service.getSnapshot(90);
       await nextTurn();
-      assert.equal(classifyProviderRequests(requests).orderbook, 90);
+      assert.equal(classifyProviderRequests(requests).orderbook, 163);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -641,7 +653,7 @@ describe("ArbitrageDashboardService orderbook cache", () => {
 
       await service.getSnapshot(365);
 
-      assert.equal(cache.size, 90);
+      assert.equal(cache.size, 163);
       assert.equal(staleKeys.length, 27);
       assert.equal(classifyProviderRequests(requests).orderbook, 27);
     } finally {
@@ -758,24 +770,24 @@ describe("ArbitrageDashboardService timing", () => {
 
       await service.getSnapshot(90);
       const cold = rawTimingLog(logs);
-      assert.deepEqual(cold.orderbook, { hits: 0, misses: 90, forceBypasses: 0, providerFetches: 90 });
-      assert.deepEqual(cold.fundingHistory, { hits: 0, misses: 51 });
+      assert.deepEqual(cold.orderbook, { hits: 0, misses: 163, forceBypasses: 0, providerFetches: 163 });
+      assert.deepEqual(cold.fundingHistory, { hits: 0, misses: 124 });
       logs.length = 0;
       requests.length = 0;
 
       await service.getSnapshot(365);
       const cached = rawTimingLog(logs);
-      assert.deepEqual(cached.orderbook, { hits: 90, misses: 0, forceBypasses: 0, providerFetches: 0 });
-      assert.deepEqual(cached.fundingHistory, { hits: 51, misses: 0 });
-      assert.deepEqual(classifyProviderRequests(requests), { tickerCurrent: 23, orderbook: 0, other: 0, total: 23 });
+      assert.deepEqual(cached.orderbook, { hits: 163, misses: 0, forceBypasses: 0, providerFetches: 0 });
+      assert.deepEqual(cached.fundingHistory, { hits: 124, misses: 0 });
+      assert.deepEqual(classifyProviderRequests(requests), { tickerCurrent: 39, orderbook: 0, other: 0, total: 39 });
       logs.length = 0;
       requests.length = 0;
 
       await service.getSnapshot(90, true);
       const forced = rawTimingLog(logs);
-      assert.deepEqual(forced.orderbook, { hits: 0, misses: 0, forceBypasses: 90, providerFetches: 90 });
-      assert.deepEqual(forced.fundingHistory, { hits: 51, misses: 0 });
-      assert.deepEqual(classifyProviderRequests(requests), { tickerCurrent: 23, orderbook: 90, other: 0, total: 113 });
+      assert.deepEqual(forced.orderbook, { hits: 0, misses: 0, forceBypasses: 163, providerFetches: 163 });
+      assert.deepEqual(forced.fundingHistory, { hits: 124, misses: 0 });
+      assert.deepEqual(classifyProviderRequests(requests), { tickerCurrent: 39, orderbook: 163, other: 0, total: 202 });
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -851,7 +863,7 @@ describe("ArbitrageDashboardService timing", () => {
       });
 
       const snapshot = await service.getSnapshot(90);
-      assert.equal(snapshot.markets.length, 90);
+      assert.equal(snapshot.markets.length, 163);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -1130,8 +1142,170 @@ function mockHyperliquidPayload(init?: RequestInit) {
   throw new Error(`Unhandled Hyperliquid mock body: ${JSON.stringify(body)}`);
 }
 
+describe("scan-only bounded partial refresh", () => {
+  it("compares 20/30/35 second scan TTL against four unchanged 25-second UI cycles", async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => jsonResponse(mockArbitragePayload(String(input), init))) as typeof fetch;
+    try {
+      const seed = (await new ArbitrageDashboardService({ timingEnabled: false }).getCurrentMarketSnapshot()).markets;
+      for (const ttl of [20_000, 30_000, 35_000]) {
+        const start = 1_800_000_000_000;
+        let now = start, loads = 0;
+        const service = new ArbitrageDashboardService({ now: () => now, scanCacheTtlMs: ttl, timingEnabled: false,
+          rawMarketLoader: async () => {
+            loads++;
+            return rawSnapshot(now, seed.map(m => ({ ...m, fetchedAt: now, fundingHistory: [] })));
+          },
+        });
+        await service.getScanSnapshot(90);
+        const states: string[] = [];
+        for (let cycle = 1; cycle <= 4; cycle++) {
+          now = start + cycle * 25_000;
+          const response = await service.getScanSnapshot(90);
+          states.push(response.refreshState!);
+          assert.equal(response.markets[0].freshness, "FRESH", "cache scheduling must not change source freshness");
+          const pending = (service as any).scanInFlight.get(90);
+          if (pending) { now += 2_000; await pending; }
+        }
+        assert.deepEqual(states, ttl === 20_000 ? ["REFRESHING", "REFRESHING", "REFRESHING", "REFRESHING"] : ["FRESH", "REFRESHING", "FRESH", "REFRESHING"]);
+        assert.equal(loads, ttl === 20_000 ? 5 : 3);
+        assert.equal((service as any).snapshotTtl, 20_000);
+        assert.equal((service as any).scanBatchDeadlineMs, 4_000);
+      }
+    } finally { globalThis.fetch = original; }
+  });
+
+  it("expires individual source facts even while the scan cache remains fresh", async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => jsonResponse(mockArbitragePayload(String(input), init))) as typeof fetch;
+    try {
+      const seed = (await new ArbitrageDashboardService({ timingEnabled: false }).getCurrentMarketSnapshot()).markets;
+      let now = 1_800_000_000_000, loads = 0;
+      const oldTime = now - 50_000;
+      const service = new ArbitrageDashboardService({ now: () => now, scanCacheTtlMs: 35_000, timingEnabled: false,
+        rawMarketLoader: async () => { loads++; return rawSnapshot(now, seed.map((m, i) => ({ ...m, fetchedAt: i === 0 ? oldTime : now, fundingHistory: [] }))); },
+      });
+      const first = await service.getScanSnapshot(90);
+      now += 15_000;
+      const cached = await service.getScanSnapshot(90);
+      assert.equal(loads, 1);
+      assert.equal(cached.generatedAt, first.generatedAt);
+      assert.equal(cached.markets[0].freshness, "UNAVAILABLE");
+      assert.equal(cached.markets[0].sourceUpdatedAt, oldTime);
+      assert.equal(cached.markets[1].freshness, "FRESH");
+      assert.ok(!cached.opportunities.some(item => item.longLeg.id === seed[0].id || item.shortLeg.id === seed[0].id));
+      assert.equal(first.markets[0].freshness, "FRESH");
+      const strict = await service.getCurrentMarketSnapshot();
+      assert.equal(strict.markets[0].freshness, undefined);
+      assert.equal(strict.markets[0].fetchedAt, oldTime);
+    } finally { globalThis.fetch = original; }
+  });
+
+  it("bounds pending transport, excludes unavailable, shares strict work and never late-commits scan", async () => {
+    const original = globalThis.fetch;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let slowCalls = 0;
+    let strictDone = false;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/market/books?instId=AAPL-USDT-SWAP")) { slowCalls++; await gate; }
+      return jsonResponse(mockArbitragePayload(url, init));
+    }) as typeof fetch;
+    const service = new ArbitrageDashboardService({ now: () => 1_800_000_000_000, scanBatchDeadlineMs: 100, timingEnabled: false });
+    try {
+      const started = performance.now();
+      const scan = await service.getScanSnapshot(90);
+      assert.ok(performance.now() - started < 2_000);
+      const slow = scan.markets.find((market) => market.id === "okx-aapl-perp")!;
+      assert.equal(slow.freshness, "UNAVAILABLE");
+      assert.equal(slow.sourceUpdatedAt, null);
+      assert.ok(scan.markets.some((market) => market.freshness === "FRESH"));
+      assert.ok(!scan.opportunities.some((item) => item.longLeg.id === slow.id || item.shortLeg.id === slow.id));
+      const strict = service.getCurrentMarketSnapshot().then((value) => { strictDone = true; return value; });
+      const secondHorizon = await service.getScanSnapshot(365);
+      assert.equal(secondHorizon.markets.find((market) => market.id === slow.id)?.freshness, "UNAVAILABLE");
+      assert.equal(strictDone, false);
+      assert.equal(slowCalls, 1);
+      release();
+      const facts = await strict;
+      assert.equal(facts.markets.find((market) => market.id === slow.id)?.freshness, undefined);
+      assert.notEqual(facts.markets.find((market) => market.id === slow.id)?.status, "disconnected");
+      assert.equal(await service.getScanSnapshot(90), scan, "late raw completion must not republish a committed scan");
+      assert.equal(scan.markets.find((market) => market.id === slow.id)?.freshness, "UNAVAILABLE");
+      const next = await service.getScanSnapshot(90, true);
+      assert.equal(next.markets.find((market) => market.id === slow.id)?.freshness, "FRESH");
+      assert.equal((await service.getSnapshot(90)).markets.some((market) => market.freshness !== undefined), false);
+    } finally { release(); await service.getCurrentMarketSnapshot(); globalThis.fetch = original; }
+  });
+
+  it("separates immediate background refreshing from per-market stale fallback without changing timestamps or scores", async () => {
+    const original = globalThis.fetch;
+    let now = 1_800_000_000_000;
+    let slow = false;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (slow && url.includes("/market/books?instId=AAPL-USDT-SWAP")) await gate;
+      return jsonResponse(mockArbitragePayload(url, init));
+    }) as typeof fetch;
+    const service = new ArbitrageDashboardService({ now: () => now, scanBatchDeadlineMs: 100, timingEnabled: false });
+    try {
+      // Seed strictly so test setup does not depend on scoring scheduling under parallel tests.
+      await service.getCurrentMarketSnapshot();
+      const first = await service.getScanSnapshot(90);
+      const old = first.markets.find((market) => market.id === "okx-aapl-perp")!;
+      now += 31_000;
+      slow = true;
+      const immediate = await service.getScanSnapshot(90);
+      assert.equal(immediate.generatedAt, first.generatedAt);
+      assert.equal(immediate.refreshState, "REFRESHING");
+      assert.equal(immediate.markets.find((market) => market.id === old.id)?.freshness, "FRESH");
+      assert.deepEqual(immediate.opportunities, first.opportunities);
+      assert.deepEqual(immediate.summary, first.summary);
+      assert.equal(immediate.markets.find((market) => market.id === old.id)?.sourceUpdatedAt, old.sourceUpdatedAt);
+      const partial = await service.getScanSnapshot(90, true);
+      assert.equal(partial.refreshState, "FRESH", "completed scan can still have one stale source");
+      assert.equal(partial.markets.filter(m => m.freshness === "STALE").length, 1);
+      const stale = partial.markets.find((market) => market.id === old.id)!;
+      assert.equal(stale.freshness, "STALE");
+      assert.equal(stale.fetchedAt, old.fetchedAt);
+      assert.equal(stale.sourceUpdatedAt, old.fetchedAt);
+      assert.notEqual(stale.sourceUpdatedAt, partial.generatedAt);
+      const opportunities = partial.opportunities.filter((item) => item.longLeg.id === old.id || item.shortLeg.id === old.id);
+      assert.ok(opportunities.length > 0);
+      assert.ok(opportunities.every((item) => item.freshness === "STALE" && item.recommendation === "blocked"));
+      assert.equal(first.markets.find((market) => market.id === old.id)?.freshness, "FRESH");
+      now += 61_000;
+      const expired = await service.getScanSnapshot(90);
+      assert.equal(expired.markets.find((market) => market.id === old.id)?.freshness, "UNAVAILABLE");
+      assert.ok(!expired.opportunities.some((item) => item.longLeg.id === old.id || item.shortLeg.id === old.id));
+    } finally { release(); await service.getCurrentMarketSnapshot(); globalThis.fetch = original; }
+  });
+
+  it("preserves HTTP retry after scan deadline without spawning a new request pool", async () => {
+    const original = globalThis.fetch;
+    let attempts = 0;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/market/books?instId=AAPL-USDT-SWAP") && ++attempts === 1) return new Response("temporary", { status: 503 });
+      return jsonResponse(mockArbitragePayload(url, init));
+    }) as typeof fetch;
+    const service = new ArbitrageDashboardService({ now: () => 1_800_000_000_000, scanBatchDeadlineMs: 50, timingEnabled: false });
+    try {
+      const partial = await service.getScanSnapshot(90);
+      assert.equal(partial.markets.find((market) => market.id === "okx-aapl-perp")?.freshness, "UNAVAILABLE");
+      await service.getCurrentMarketSnapshot();
+      assert.equal(attempts, 2);
+      assert.equal((await service.getCurrentMarketSnapshot()).markets.some((market) => market.freshness !== undefined), false);
+    } finally { globalThis.fetch = original; }
+  });
+});
+
 function allSymbols() {
   return [...new Set([
+    ...["AAPL", "AMZN", "META", "COIN", "PLTR", "MSTR", "HOOD", "INTC", "AVGO", "ORCL", "NFLX", "CRM", "WMT", "CRCL", "SNDK", "QCOM", "UBER", "JPM", "V"].map((asset) => `${asset}USDT`),
     "PAXGUSDT",
     "XAUTUSDT",
     "XAUUSDT",
@@ -1161,11 +1335,13 @@ function allSymbols() {
 }
 
 function perpSymbols() {
-  return allSymbols().filter((symbol) => !symbol.startsWith("R") && !symbol.endsWith("BUSDT") && !symbol.endsWith("XUSDT"));
+  const spotOnly = new Set(["RMUUSDT", "RNVDAUSDT", "RGOOGLUSDT", "RMSFTUSDT", "RTSLAUSDT", "NVDABUSDT", "GOOGLBUSDT", "MSFTBUSDT", "TSLABUSDT", "NVDAXUSDT", "GOOGLXUSDT", "TSLAXUSDT"]);
+  return allSymbols().filter((symbol) => !spotOnly.has(symbol));
 }
 
 function okxSymbols() {
   return [
+    ...["AAPL", "AMZN", "META", "COIN", "PLTR", "MSTR", "HOOD", "INTC", "AVGO", "ORCL", "NFLX", "CRM", "WMT", "CRCL", "SNDK", "QCOM"].map((asset) => `${asset}-USDT-SWAP`),
     "PAXG-USDT",
     "XAUT-USDT",
     "XAU-USDT-SWAP",

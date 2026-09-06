@@ -84,8 +84,10 @@ const OpportunityRow = memo(function OpportunityRow({ opportunity, holdingDays, 
     >
       <td className="sticky left-0 z-[1] bg-black px-5 py-4">
         <div className="flex flex-col items-start gap-1.5">
-          <RecommendationBadge recommendation={opportunity.recommendation} />
-          <EntryStatusBadge entryStatus={opportunity.entryStatus} />
+          {opportunity.freshness === "STALE" ? <span className="text-xs text-amber-300">历史机会 · 更新未完成</span> : <>
+            <RecommendationBadge recommendation={opportunity.recommendation} />
+            <EntryStatusBadge entryStatus={opportunity.entryStatus} />
+          </>}
         </div>
       </td>
       <td className="px-5 py-4"><Leg leg={opportunity.longLeg} side="long" /></td>

@@ -68,6 +68,11 @@ async function ingest(size: string, funding: string) {
   const facts: ArbitrageFundingFact[] = [];
   const coverages: FundingHistoryCoverage[] = [];
   let reads = 0;
+  let strictReads = 0;
+  const markets = {
+    async getCurrentMarketSnapshot() { strictReads++; return { generatedAt: now, markets: [market()] }; },
+    async getScanSnapshot() { throw new Error("Funding schedule must not read scan fallback"); },
+  };
   const service = new BybitFundingIngestionService({
     listFundingManagedPerpContexts: () => [{ userId: "user", venue: "bybit", accountId: "account", instrumentId: "DOGE-USDT-PERP" }],
     listFundingAttributionCandidates: () => [value],
@@ -77,9 +82,7 @@ async function ingest(size: string, funding: string) {
     listFacts: () => [],
     readCoverage: () => null,
     recordCoverage: (coverage) => { coverages.push(coverage); return coverage; },
-  }, {
-    async getCurrentMarketSnapshot() { return { generatedAt: now, markets: [market()] }; },
-  }, {
+  }, markets, {
     async read(userId, input) {
       reads += 1;
       assert.equal(userId, "user");
@@ -88,6 +91,7 @@ async function ingest(size: string, funding: string) {
     },
   }, { now: () => now });
   await service.runOnce();
+  assert.equal(strictReads, 1);
   return { facts, coverages, reads };
 }
 

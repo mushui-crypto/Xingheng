@@ -15,6 +15,25 @@ export const ARBITRAGE_ASSET_ORDER = [
   "GOOGL",
   "MSFT",
   "TSLA",
+  "AAPL",
+  "AMZN",
+  "META",
+  "COIN",
+  "PLTR",
+  "MSTR",
+  "HOOD",
+  "INTC",
+  "AVGO",
+  "ORCL",
+  "NFLX",
+  "CRM",
+  "WMT",
+  "CRCL",
+  "SNDK",
+  "QCOM",
+  "UBER",
+  "JPM",
+  "V",
 ] as const;
 export type ArbitrageAsset = (typeof ARBITRAGE_ASSET_ORDER)[number];
 export type ArbitrageVenue = "binance" | "bybit" | "bitget" | "okx" | "tradexyz";
@@ -26,6 +45,8 @@ export type ArbitrageConfidence = "high" | "medium" | "low";
 export type ArbitrageOpportunityDriver = "funding" | "basis" | "mixed";
 
 export type ArbitrageMarket = {
+  sourceUpdatedAt?: number | null;
+  freshness?: "FRESH" | "STALE" | "UNAVAILABLE";
   id: string;
   venue: ArbitrageVenue;
   venueLabel: string;
@@ -64,6 +85,7 @@ export type ArbitrageOpportunityLeg = Pick<
 >;
 
 export type ArbitrageOpportunity = {
+  freshness?: "FRESH" | "STALE";
   id: string;
   longLeg: ArbitrageOpportunityLeg;
   shortLeg: ArbitrageOpportunityLeg;
@@ -101,6 +123,8 @@ export type ArbitrageOpportunity = {
 };
 
 export type ArbitrageDashboardSnapshot = {
+  /** Scan cache lifecycle only; independent of market fact freshness. */
+  refreshState?: "FRESH" | "REFRESHING";
   horizonDays: ArbitrageHorizon;
   generatedAt: number;
   markets: ArbitrageMarket[];

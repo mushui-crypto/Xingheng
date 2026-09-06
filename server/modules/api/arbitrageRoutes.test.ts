@@ -6,6 +6,15 @@ import { ArbitrageRefreshCooldownError } from "../arbitrage/ArbitrageDashboardSe
 import type { ArbitrageDashboardSnapshot } from "../arbitrage/arbitrageTypes";
 
 describe("arbitrage dashboard public access and refresh protection", () => {
+  it("preserves independent scan refresh state without rewriting source facts", async () => {
+    const value = { ...snapshot(90), refreshState: "REFRESHING" as const };
+    const { route } = buildArbitrageRouteHarness({ tokenStatus: null, getSnapshot: async () => value });
+    const response = createMockResponse();
+    await route(createMockRequest() as any, response as any);
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.body, value);
+    assert.equal((response.body as ArbitrageDashboardSnapshot).refreshState, "REFRESHING");
+  });
   it("allows anonymous GET requests", async () => {
     const { auth, route } = buildArbitrageRouteHarness({ tokenStatus: null });
     const request = createMockRequest();
@@ -77,7 +86,8 @@ function buildArbitrageRouteHarness(options: HarnessOptions) {
     },
   } as any);
   registerArbitrageRoutes(app as any, {
-    getSnapshot: options.getSnapshot ?? (async (horizonDays: 90 | 365) => snapshot(horizonDays)),
+    getSnapshot: () => assert.fail("public scanner must not call strict consumer API"),
+    getScanSnapshot: options.getSnapshot ?? (async (horizonDays: 90 | 365) => snapshot(horizonDays)),
   } as any);
   assert.equal(typeof auth, "function");
   assert.equal(typeof route, "function");

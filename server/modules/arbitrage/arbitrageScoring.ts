@@ -47,7 +47,10 @@ export function scoreOpportunity(
   const strategyType = longMarket.venue === shortMarket.venue
     ? "same_venue_neutral"
     : "cross_venue_arbitrage";
-  const matchQuality = getMatchQuality(longMarket.asset, shortMarket.asset);
+  const stockPerpetualPair = isStockRwaAsset(longMarket.asset)
+    && longMarket.asset === shortMarket.asset
+    && longMarket.kind === "perpetual" && shortMarket.kind === "perpetual";
+  const matchQuality = stockPerpetualPair ? "oracle" : getMatchQuality(longMarket.asset, shortMarket.asset);
   const dailySpreads = buildDailyFundingSpreads(longMarket, shortMarket, lookbackDays);
   const historicalGrossApr = dailySpreads.length > 0
     ? average(dailySpreads) * 365 * 100
@@ -151,7 +154,7 @@ export function scoreOpportunity(
     strategyType,
     strategyLabel: strategyType === "same_venue_neutral" ? "同所中性" : "跨所套利",
     matchQuality,
-    matchLabel: matchQuality === "exact" ? "精确匹配" : matchQuality === "oracle" ? "同类黄金指数" : "关联标的",
+    matchLabel: stockPerpetualPair ? "指数源差异" : matchQuality === "exact" ? "精确匹配" : matchQuality === "oracle" ? "同类黄金指数" : "关联标的",
     currentGrossApr: roundMetric(currentGrossApr),
     historicalGrossApr: roundMetric(historicalGrossApr),
     netApr: roundMetric(netApr),
@@ -485,7 +488,10 @@ function isGoldAsset(value: string) {
 }
 
 function isStockRwaAsset(value: string) {
-  return value === "MU" || value === "NVDA" || value === "GOOGL" || value === "MSFT" || value === "TSLA";
+  return [
+    "MU", "NVDA", "GOOGL", "MSFT", "TSLA",
+    "AAPL", "AMZN", "META", "COIN", "PLTR", "MSTR", "HOOD", "INTC", "AVGO", "ORCL", "NFLX", "CRM", "WMT", "CRCL", "SNDK", "QCOM", "UBER", "JPM", "V",
+  ].includes(value);
 }
 
 function average(values: number[]) {

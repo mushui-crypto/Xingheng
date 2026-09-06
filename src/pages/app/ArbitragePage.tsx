@@ -243,6 +243,7 @@ export function ArbitragePage() {
         </div>
         <div className="flex items-center gap-3 text-xs text-muted">
           <span>{snapshot ? `更新于 ${new Date(snapshot.generatedAt).toLocaleTimeString("zh-CN", { hour12: false })}` : "等待数据"}</span>
+          {snapshot?.refreshState === "REFRESHING" ? <span className="text-muted" role="status">后台更新中</span> : null}
           <button
             type="button"
             className="inline-flex h-10 w-10 items-center justify-center border border-white/20 text-white transition hover:border-white hover:bg-white/[0.04] focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-white disabled:opacity-50"

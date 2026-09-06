@@ -15,7 +15,7 @@ export function registerArbitrageRoutes(
       const requested = Number(request.query.horizonDays ?? 90);
       const horizonDays = supportedHorizons.has(requested) ? requested as 90 | 365 : 90;
       const forceRefresh = request.query.refresh === "1";
-      response.json(await service.getSnapshot(horizonDays, forceRefresh));
+      response.json(await service.getScanSnapshot(horizonDays, forceRefresh));
     } catch (error) {
       if (error instanceof ArbitrageRefreshCooldownError) {
         response.setHeader("Retry-After", String(error.retryAfterSeconds));

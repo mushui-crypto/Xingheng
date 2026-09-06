@@ -9,6 +9,25 @@ export type ArbitrageAsset =
   | "GOOGL"
   | "MSFT"
   | "TSLA"
+  | "AAPL"
+  | "AMZN"
+  | "META"
+  | "COIN"
+  | "PLTR"
+  | "MSTR"
+  | "HOOD"
+  | "INTC"
+  | "AVGO"
+  | "ORCL"
+  | "NFLX"
+  | "CRM"
+  | "WMT"
+  | "CRCL"
+  | "SNDK"
+  | "QCOM"
+  | "UBER"
+  | "JPM"
+  | "V"
   | "BTC"
   | "ETH"
   | "SOL"
@@ -35,6 +54,8 @@ export type OrderbookLevel = {
 };
 
 export type ArbitrageMarket = {
+  sourceUpdatedAt?: number | null;
+  freshness?: "FRESH" | "STALE" | "UNAVAILABLE";
   id: string;
   venue: ArbitrageVenue;
   venueLabel: string;
@@ -83,6 +104,7 @@ export type ArbitrageScoreBreakdown = {
 };
 
 export type ArbitrageOpportunity = {
+  freshness?: "FRESH" | "STALE";
   id: string;
   longLeg: ArbitrageOpportunityLeg;
   shortLeg: ArbitrageOpportunityLeg;
@@ -114,6 +136,8 @@ export type ArbitrageOpportunity = {
 };
 
 export type ArbitrageDashboardSnapshot = {
+  /** Scan cache lifecycle only; never overrides per-market fact freshness. */
+  refreshState?: "FRESH" | "REFRESHING";
   horizonDays: 90 | 365;
   generatedAt: number;
   markets: ArbitrageMarket[];

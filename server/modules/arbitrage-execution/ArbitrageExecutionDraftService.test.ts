@@ -16,6 +16,24 @@ import {
 
 const now = Date.now();
 
+test("scan quotes cannot influence execution sizing: strict catalog identity plus verified context only", async () => {
+  const catalog = opportunity("binance", "binance");
+  catalog.longLeg.bid = 999999;
+  catalog.longLeg.ask = 999999;
+  catalog.shortLeg.bid = 0.000001;
+  catalog.shortLeg.ask = 0.000001;
+  const result = await draftService(catalog, new FakeContexts()).preview("user-a", {
+    opportunityId: catalog.id, horizonDays: 90, executionMode: "EXECUTION_PRIORITY",
+    quantityInput: { mode: "NOTIONAL_USDT", amountUsdt: "20" },
+  });
+  for (const leg of result.legs) {
+    assert.equal(leg.quote?.bid, "10");
+    assert.equal(leg.quote?.ask, "10");
+    assert.equal(leg.planning.status, "PLANNED");
+    if (leg.planning.status === "PLANNED") assert.equal(leg.planning.plan.sizingPrice, "10");
+  }
+});
+
 test("builds an authoritative two-leg NOTIONAL_USDT preview without trusting provider fields", async () => {
   const contexts = new FakeContexts();
   const service = draftService(opportunity("binance", "binance"), contexts);
@@ -407,8 +425,12 @@ function draftService(
   for (const venue of options.registeredVenues ?? ["binance", "okx"]) {
     runtimes.register(formalExecutionRuntime(venue, venue === "okx" ? okxProductionRuntime : unusedRuntime));
   }
+  const dashboard = {
+    getSnapshot: async (horizonDays: 90 | 365) => snapshot(horizonDays, value),
+    getScanSnapshot: async () => { throw new Error("Execution must not read scan fallback"); },
+  };
   return new ArbitrageExecutionDraftService(
-    { getSnapshot: async (horizonDays: 90 | 365) => snapshot(horizonDays, value) },
+    dashboard,
     contexts,
     {
       findSummary: (userId: string, venue: string) => {

@@ -89,6 +89,8 @@ type RawMarketSnapshot = {
 };
 
 type ArbitrageDashboardServiceOptions = {
+  scanCacheTtlMs?: number;
+  scanBatchDeadlineMs?: number;
   now?: () => number;
   monotonicNow?: () => number;
   timingEnabled?: boolean;
@@ -133,8 +135,30 @@ const instruments: InstrumentConfig[] = [
     fundingIntervalHours: 1,
   }),
   ...stockRwaInstruments(),
+  ...additionalStockPerpetuals(),
   ...mainstreamCryptoInstruments(),
 ];
+
+// Audited public contract catalogs, 2026-09-06. No inferred spot tokens,
+// aliases, ETFs or pre-IPO instruments. This is an analysis-only universe.
+function additionalStockPerpetuals(): InstrumentConfig[] {
+  const fourVenueAssets: ArbitrageAsset[] = [
+    "AAPL", "AMZN", "META", "COIN", "PLTR", "MSTR", "HOOD", "INTC",
+    "AVGO", "ORCL", "NFLX", "CRM", "WMT", "CRCL", "SNDK", "QCOM",
+  ];
+  const threeVenueAssets: ArbitrageAsset[] = ["UBER", "JPM", "V"];
+  return [...fourVenueAssets, ...threeVenueAssets].flatMap((asset) => {
+    const slug = asset.toLowerCase();
+    return [
+      instrument(`binance-${slug}-perp`, "binance", "Binance", `${asset}USDT`, asset, "perpetual", 5, { fundingIntervalHours: 8 }),
+      instrument(`bybit-${slug}-perp`, "bybit", "Bybit", `${asset}USDT`, asset, "perpetual", 5.5, { fundingIntervalHours: 8 }),
+      instrument(`bitget-${slug}-perp`, "bitget", "Bitget", `${asset}USDT`, asset, "perpetual", 6, { fundingIntervalHours: 8 }),
+      ...(fourVenueAssets.includes(asset)
+        ? [instrument(`okx-${slug}-perp`, "okx", "OKX", `${asset}-USDT-SWAP`, asset, "perpetual", 5, { fundingIntervalHours: 8, sizeMultiplier: 1 })]
+        : []),
+    ];
+  });
+}
 
 function stockRwaInstruments(): InstrumentConfig[] {
   return [
@@ -195,6 +219,16 @@ function mainstreamCryptoInstruments(): InstrumentConfig[] {
 }
 
 export class ArbitrageDashboardService {
+  // Scan-only projections never feed strict/raw consumers or their caches.
+  private scanSnapshots = new Map<number, { expiresAt: number; value: ArbitrageDashboardSnapshot }>();
+  private scanInFlight = new Map<number, Promise<ArbitrageDashboardSnapshot>>();
+  private scanLastKnown = new Map<string, InternalArbitrageMarket>();
+  private scanGeneration = 0;
+  private scanGenerations = new Map<number, number>();
+  private scanLastForcedAt: number | null = null;
+  private rawProgress = new Map<string, InternalArbitrageMarket>();
+  private readonly scanBatchDeadlineMs: number;
+  private readonly scanCacheTtl: number;
   private snapshots = new Map<number, { expiresAt: number; value: ArbitrageDashboardSnapshot }>();
   private history = new Map<string, { expiresAt: number; value: FundingPoint[] }>();
   private orderbooks = new Map<string, { fetchedAt: number; value: OrderbookSnapshot }>();
@@ -214,6 +248,10 @@ export class ArbitrageDashboardService {
   private readonly rawMarketLoader: (forceRefresh?: boolean) => Promise<RawMarketSnapshot>;
 
   constructor(options: ArbitrageDashboardServiceOptions = {}) {
+    this.scanCacheTtl = options.scanCacheTtlMs ?? 30_000;
+    if (!Number.isFinite(this.scanCacheTtl) || this.scanCacheTtl <= 0) throw new Error("Invalid scan cache TTL");
+    this.scanBatchDeadlineMs = options.scanBatchDeadlineMs ?? 4_000;
+    if (!Number.isFinite(this.scanBatchDeadlineMs) || this.scanBatchDeadlineMs <= 0) throw new Error("Invalid scan batch deadline");
     this.now = options.now ?? Date.now;
     this.monotonicNow = options.monotonicNow ?? (() => performance.now());
     this.timingEnabled = options.timingEnabled ?? options.rawMarketLoader === undefined;
@@ -224,6 +262,7 @@ export class ArbitrageDashboardService {
     this.rawMarketLoader = options.rawMarketLoader ?? ((forceRefresh) => this.loadRawMarketSnapshot(forceRefresh));
   }
 
+  /** Existing strict consumer contract: no scan fallback or scan deadline. */
   async getSnapshot(horizonDays: 90 | 365, forceRefresh = false): Promise<ArbitrageDashboardSnapshot> {
     const cached = this.snapshots.get(horizonDays);
     const now = this.now();
@@ -262,7 +301,86 @@ export class ArbitrageDashboardService {
     return this.refreshSnapshot(horizonDays, false, "dashboard_cold");
   }
 
-  /** Shares the existing Raw Market Snapshot without scoring or adding a Provider read path. */
+  /** Public scanner only. Strict consumers must continue using the existing methods. */
+  async getScanSnapshot(horizonDays: 90 | 365, forceRefresh = false): Promise<ArbitrageDashboardSnapshot> {
+    const cached = this.scanSnapshots.get(horizonDays);
+    if (!forceRefresh && cached && cached.expiresAt > this.now()) return currentScanView(cached.value, this.now());
+    const pending = this.scanInFlight.get(horizonDays);
+    if (pending) return !forceRefresh && cached ? refreshingScanView(cached.value, this.now()) : pending;
+    if (forceRefresh && this.scanLastForcedAt !== null && this.now() - this.scanLastForcedAt < this.forcedRefreshCooldown) {
+      if (cached) return currentScanView(cached.value, this.now());
+      throw new ArbitrageRefreshCooldownError(this.forcedRefreshCooldown - (this.now() - this.scanLastForcedAt));
+    }
+    if (forceRefresh) this.scanLastForcedAt = this.now();
+    const generation = ++this.scanGeneration;
+    this.scanGenerations.set(horizonDays, generation);
+    const request = this.loadScanSnapshot(horizonDays, forceRefresh).then((value) => {
+      // There is one active scan per horizon. Old background completions never publish.
+      if (this.scanGenerations.get(horizonDays) === generation) {
+        this.scanSnapshots.set(horizonDays, { expiresAt: this.now() + this.scanCacheTtl, value });
+      }
+      return value;
+    }).finally(() => { this.scanInFlight.delete(horizonDays); });
+    this.scanInFlight.set(horizonDays, request);
+    if (cached && !forceRefresh) {
+      void request.catch(() => undefined);
+      return refreshingScanView(cached.value, this.now());
+    }
+    return request;
+  }
+
+  private async loadScanSnapshot(horizonDays: 90 | 365, forceRefresh: boolean) {
+    const startedAt = this.monotonicNow();
+    // Join an existing strict refresh, including after a prior scan deadline.
+    // No second worker pool/request generation may pile up behind it.
+    const rawRequest = this.getRawMarketSnapshot(forceRefresh && !this.rawMarketInFlight);
+    const progress = this.rawProgress;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const outcome = await Promise.race([
+      rawRequest.then((value) => value, () => null),
+      new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), this.scanBatchDeadlineMs); }),
+    ]).finally(() => { if (timer) clearTimeout(timer); });
+    const completed = new Map(outcome ? outcome.markets.map((market) => [market.id, market]) : progress);
+    const previousStrict = new Map(this.rawMarketSnapshot?.value.markets.map((market) => [market.id, market]));
+    const markets = instruments.map((config): InternalArbitrageMarket => {
+      const current = completed.get(config.id);
+      if (current && current.status !== "disconnected" && Number.isFinite(current.fetchedAt)
+        && this.now() - current.fetchedAt >= 0 && this.now() - current.fetchedAt <= 60_000) {
+        const known = this.scanLastKnown.get(config.id);
+        if (!known || current.fetchedAt >= known.fetchedAt) this.scanLastKnown.set(config.id, current);
+        return { ...current, sourceUpdatedAt: current.fetchedAt, freshness: "FRESH" };
+      }
+      const scanKnown = this.scanLastKnown.get(config.id);
+      const strictKnown = previousStrict.get(config.id);
+      const known = strictKnown && strictKnown.status !== "disconnected" && (!scanKnown || strictKnown.fetchedAt > scanKnown.fetchedAt)
+        ? strictKnown : scanKnown;
+      if (known && Number.isFinite(known.fetchedAt) && this.now() - known.fetchedAt >= 0
+        && this.now() - known.fetchedAt <= 60_000) return {
+        ...known, sourceUpdatedAt: known.fetchedAt, freshness: "STALE", status: "degraded",
+        warnings: [...new Set([...known.warnings, "扫描刷新未完成，显示历史数据"])] ,
+      };
+      return { ...disconnectedMarket(config, new Error("扫描刷新未完成，暂无可靠数据")), sourceUpdatedAt: null, freshness: "UNAVAILABLE" };
+    });
+    const raw: RawMarketSnapshot = {
+      generatedAt: this.now(), markets,
+      stablecoin: outcome?.stablecoin ?? { price: null, warnings: ["扫描批次未完整完成，USDC/USDT 数据暂不可用"] },
+    };
+    const rawMarketMs = this.monotonicNow() - startedAt;
+    const scoringStartedAt = this.monotonicNow();
+    const value = await this.loadSnapshot(horizonDays, false, "dashboard_cold", raw);
+    value.refreshState = "FRESH";
+    this.emitTiming("[arbitrage-dashboard] scan refresh complete", {
+      deadlineMs: this.scanBatchDeadlineMs, totalMs: roundMs(this.monotonicNow() - startedAt),
+      rawMarketMs: roundMs(rawMarketMs), scoringMs: roundMs(this.monotonicNow() - scoringStartedAt),
+      partial: outcome === null,
+      fresh: markets.filter((market) => market.freshness === "FRESH").length,
+      stale: markets.filter((market) => market.freshness === "STALE").length,
+      unavailable: markets.filter((market) => market.freshness === "UNAVAILABLE").length,
+    });
+    return value;
+  }
+
+  /** Shares strict Raw Market Snapshot; never returns a scan projection. */
   async getCurrentMarketSnapshot(): Promise<Readonly<{ generatedAt: number; markets: readonly ArbitrageMarket[] }>> {
     const { generatedAt, markets } = await this.getRawMarketSnapshot(false);
     return Object.freeze({
@@ -306,6 +424,7 @@ export class ArbitrageDashboardService {
     horizonDays: 90 | 365,
     forceRawMarketRefresh: boolean,
     trigger: "dashboard_cold" | "dashboard_cache_stale_served" | "force_refresh",
+    scanRaw?: RawMarketSnapshot,
   ): Promise<ArbitrageDashboardSnapshot> {
     const dashboardStartedAt = this.monotonicNow();
     const rawMarketState = forceRawMarketRefresh
@@ -316,10 +435,25 @@ export class ArbitrageDashboardService {
           ? "raw_refresh_inflight"
           : "raw_cache_refresh";
     const rawMarketStartedAt = this.monotonicNow();
-    const { generatedAt, markets, stablecoin } = await this.getRawMarketSnapshot(forceRawMarketRefresh);
+    const { generatedAt, markets, stablecoin } = scanRaw ?? await this.getRawMarketSnapshot(forceRawMarketRefresh);
     const rawMarketMs = this.monotonicNow() - rawMarketStartedAt;
     const scoringStartedAt = this.monotonicNow();
-    const opportunities = buildArbitrageOpportunities(markets, horizonDays, fundingLookbackDays);
+    const opportunities = buildArbitrageOpportunities(scanRaw ? markets.filter((market) => market.freshness !== "UNAVAILABLE") : markets, horizonDays, fundingLookbackDays);
+    if (scanRaw) {
+      const staleIds = new Set(markets.filter((market) => market.freshness === "STALE").map((market) => market.id));
+      for (const opportunity of opportunities) {
+        const stale = staleIds.has(opportunity.longLeg.id) || staleIds.has(opportunity.shortLeg.id);
+        opportunity.freshness = stale ? "STALE" : "FRESH";
+        if (stale) {
+          opportunity.recommendation = "blocked";
+          opportunity.entryStatus = "blocked";
+          opportunity.confidence = "low";
+          opportunity.automationEligible = false;
+          opportunity.warnings.push("历史扫描数据，仅供参考，不能视为实时机会");
+        }
+      }
+      opportunities.sort((left, right) => Number(left.freshness === "STALE") - Number(right.freshness === "STALE"));
+    }
     const scoringMs = this.monotonicNow() - scoringStartedAt;
     const assemblyStartedAt = this.monotonicNow();
     const active = opportunities.filter((item) => item.recommendation !== "blocked");
@@ -386,6 +520,7 @@ export class ArbitrageDashboardService {
       return queued;
     }
 
+    this.rawProgress = new Map();
     const request = Promise.resolve()
       .then(() => this.rawMarketLoader(forceRefresh))
       .then((snapshot) => {
@@ -402,6 +537,7 @@ export class ArbitrageDashboardService {
   }
 
   private async loadRawMarketSnapshot(forceRefresh = false): Promise<RawMarketSnapshot> {
+    const progress = this.rawProgress;
     const timing = this.timingEnabled ? createArbitrageRawRefreshTiming(this.monotonicNow) : undefined;
     const rawStartedAt = this.monotonicNow();
     const currentBatches = createCurrentMarketBatches(timing);
@@ -412,7 +548,11 @@ export class ArbitrageDashboardService {
         () => mapWithConcurrency(
           instruments,
           marketLoadConcurrency,
-          (config) => this.loadMarket(config, currentBatches, forceRefresh, timing),
+          async (config) => {
+            const market = await this.loadMarket(config, currentBatches, forceRefresh, timing);
+            progress.set(config.id, market);
+            return market;
+          },
         ),
         (durationMs) => { currentMarketMs = durationMs; },
       ),
@@ -1167,6 +1307,35 @@ function postHyperliquid(body: unknown, timing?: ArbitrageRawRefreshTimingContex
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   }, timing);
+}
+
+function marketFactExpired(market: ArbitrageMarket, now: number) {
+  return !Number.isFinite(market.fetchedAt) || now - market.fetchedAt < 0 || now - market.fetchedAt > 60_000;
+}
+
+// Cache lifetime controls refresh scheduling, never the lifetime of source facts.
+function currentScanView(snapshot: ArbitrageDashboardSnapshot, now: number): ArbitrageDashboardSnapshot {
+  const expired = new Set(snapshot.markets.filter((market) => market.freshness !== "UNAVAILABLE" && marketFactExpired(market, now)).map((market) => market.id));
+  if (expired.size === 0) return snapshot;
+  const markets = snapshot.markets.map((market): ArbitrageMarket => expired.has(market.id)
+    ? { ...market, freshness: "UNAVAILABLE", status: "disconnected" } : market);
+  const opportunities = snapshot.opportunities.filter((item) => !expired.has(item.longLeg.id) && !expired.has(item.shortLeg.id));
+  const active = opportunities.filter((item) => item.recommendation !== "blocked");
+  return {
+    ...snapshot, markets, opportunities,
+    summary: {
+      ...snapshot.summary,
+      bestScore: active[0]?.score ?? null,
+      bestNetApr: active.length ? Math.max(...active.map((item) => item.netApr)) : null,
+      eligibleOpportunityCount: opportunities.filter((item) => item.recommendation === "recommended" || item.recommendation === "watch").length,
+      connectedVenueCount: new Set(markets.filter((market) => market.status !== "disconnected").map((market) => market.venue)).size,
+    },
+  };
+}
+
+function refreshingScanView(snapshot: ArbitrageDashboardSnapshot, now: number): ArbitrageDashboardSnapshot {
+  // Cache expiry is scheduling state, not evidence that every source fact is stale.
+  return { ...currentScanView(snapshot, now), refreshState: "REFRESHING" };
 }
 
 function numberValue(value: unknown) {

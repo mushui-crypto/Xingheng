@@ -49,10 +49,11 @@ export const ArbitrageMarketTable = memo(function ArbitrageMarketTable({ markets
 });
 
 function MarketValues({ market, showSymbol }: { market: ArbitrageMarket; showSymbol: boolean }) {
-  const available = market.status !== "disconnected";
+  const available = market.status !== "disconnected" && market.freshness !== "UNAVAILABLE";
   const price = available && market.markPrice !== null && Number.isFinite(market.markPrice) && market.markPrice > 0 ? market.markPrice : null;
   const funding = available && market.fundingRate !== null && Number.isFinite(market.fundingRate) ? market.fundingRate : null;
   return <div className="min-w-0 text-xs leading-5">
+    {market.freshness === "STALE" ? <p className="mb-1 text-amber-300" title={market.sourceUpdatedAt ? `数据时间：${new Date(market.sourceUpdatedAt).toLocaleString()}` : undefined}>历史数据 · 更新未完成</p> : market.freshness === "UNAVAILABLE" ? <p className="mb-1 text-muted">暂无可靠数据</p> : null}
     {showSymbol ? <p className="break-all font-mono text-muted">{market.symbol}</p> : null}
     <div className="flex flex-wrap items-baseline gap-x-2"><span className="text-muted">资金费率</span><span className="font-mono text-white">{market.kind === "spot" ? "不适用" : funding === null ? "—" : formatFundingRate(funding)}</span>{market.kind === "perpetual" && funding !== null && market.fundingIntervalHours !== null && market.fundingIntervalHours > 0 ? <span className="text-muted">/ {market.fundingIntervalHours}h</span> : null}</div>
     <div className="mt-2 flex flex-wrap items-baseline gap-x-2"><span className="text-muted">当前价格</span><span className="font-mono text-white">{price === null ? "—" : formatPrice(price)}</span>{price !== null ? <span className="text-muted">{market.quoteAsset}</span> : null}</div>

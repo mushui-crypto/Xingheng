@@ -42,6 +42,26 @@ test("stock RWA opportunities require the same underlying while allowing same-ve
     .some((warning) => warning.includes("历史数据覆盖不足")));
 });
 
+test("stock perpetuals pair only the same equity and disclose index source differences", () => {
+  for (const asset of ["AAPL", "AMZN", "NVDA", "UBER", "JPM", "V"] as const) {
+    const markets = [
+      marketAtVenue("long", "binance", asset, "perpetual", -0.0001),
+      marketAtVenue("short", "bybit", asset, "perpetual", 0.0004),
+      marketAtVenue("other-stock", "bitget", "TSLA", "perpetual", 0.0007),
+    ];
+    const opportunities = buildArbitrageOpportunities(markets, 90);
+    assert.equal(opportunities.length, 2);
+    for (const opportunity of opportunities) {
+      assert.equal(opportunity.matchQuality, "oracle");
+      assert.equal(opportunity.matchLabel, "指数源差异");
+      assert.equal(opportunity.strategyType, "cross_venue_arbitrage");
+      assert.equal(opportunity.automationEligible, false);
+      assert.ok(opportunity.warnings.some((warning) => warning.includes("指数源")));
+      assert.ok(opportunity.warnings.some((warning) => warning.includes("公司行动")));
+    }
+  }
+});
+
 test("exact-asset opportunity can be recommended when persistent net carry covers costs", () => {
   const long = market("long", "XAUT", "spot", 0);
   const short = market("short", "XAUT", "perpetual", 0.0004);
