@@ -122,6 +122,34 @@ test("analysis component renders dashboard metrics and keeps old automation rule
   assert.doesNotMatch(html, /Estimated Net Yield|Funding Spread|Expiry/u);
 });
 
+test("analysis uses complete metric rows and separates dense facts into labeled values", () => {
+  const html = renderToStaticMarkup(<ArbitrageOpportunityAnalysis
+    opportunity={opportunity} longMarket={longMarket} shortMarket={shortMarket} holdingDays={90}
+  />);
+  for (const [section, columns] of [
+    ["analysis-summary-title", 3], ["holding-scenario-title", 4],
+    ["historical-funding-title", 2], ["cost-analysis-title", 3],
+    ["market-comparison-title", 2], ["comprehensive-analysis-title", 4],
+  ] as const) {
+    const content = html.split(`aria-labelledby="${section}"`)[1]?.split("</section>")[0];
+    assert.ok(content);
+    assert.match(content, new RegExp(`data-metric-columns="${columns}"`));
+  }
+  assert.match(html, /<dt[^>]*>1 万美元滑点<\/dt>/);
+  assert.match(html, /<dt[^>]*>数据覆盖<\/dt>/);
+  assert.match(html, /<dt[^>]*>24小时成交额<\/dt>/);
+  assert.doesNotMatch(html, /吃单费 .* · .*滑点/);
+});
+
+test("analysis keeps missing market and spot funding explanations without fabricated values", () => {
+  const html = renderToStaticMarkup(<ArbitrageOpportunityAnalysis
+    opportunity={opportunity} longMarket={longMarket} shortMarket={null} holdingDays={365}
+  />);
+  assert.match(html, /现货无资金费率/);
+  assert.match(html, /市场详情不可用/);
+  assert.match(html, /365 天/);
+});
+
 function market(overrides: Partial<ArbitrageMarket>): ArbitrageMarket {
   return {
     id: "binance-btc-spot",

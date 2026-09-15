@@ -50,7 +50,7 @@ export function ArbitrageOpportunityAnalysis({
           <LegSummary leg={opportunity.longLeg} side="long" />
           <LegSummary leg={opportunity.shortLeg} side="short" />
         </div>
-        <MetricGrid>
+        <MetricGrid columns={3}>
           <Metric label="套利类型" value={`${opportunity.strategyLabel} · ${opportunity.matchLabel}`} />
           <Metric label="当前费率差" value={formatApr(opportunity.currentGrossApr, true)} />
           <Metric label="估算净 APR" value={formatApr(opportunity.netApr, true)} />
@@ -66,7 +66,7 @@ export function ArbitrageOpportunityAnalysis({
           title="持有测算"
           description={`${holdingDays} 天仅用于收益测算、成本摊销和复利情景，不代表建议持有期限。`}
         />
-        <MetricGrid>
+        <MetricGrid columns={4}>
           <Metric label="持有测算情景" value={`${holdingDays} 天`} />
           <Metric label="估算净 APR" value={formatApr(opportunity.netApr, true)} />
           <Metric label="估算净 APY" value={formatApr(estimatedApy, true)} />
@@ -76,7 +76,7 @@ export function ArbitrageOpportunityAnalysis({
 
       <section className="space-y-4" aria-labelledby="historical-funding-title">
         <SectionTitle id="historical-funding-title" title="历史资金费率" description="历史指标基于现有近 90 天公开资金费率数据。" />
-        <MetricGrid>
+        <MetricGrid columns={2}>
           <Metric label="近 90 天费率差" value={formatApr(opportunity.historicalGrossApr, true)} />
           <Metric label="历史有利天数" value={formatRatio(opportunity.persistenceRatio)} />
           <HistoricalFundingMetrics label="做多腿" market={longMarket} />
@@ -86,7 +86,7 @@ export function ArbitrageOpportunityAnalysis({
 
       <section className="space-y-4" aria-labelledby="cost-analysis-title">
         <SectionTitle id="cost-analysis-title" title="成本与流动性" description="成本数据沿用套利看板现有手续费、盘口和滑点口径。" />
-        <MetricGrid>
+        <MetricGrid columns={3}>
           <Metric label="往返成本" value={formatBps(opportunity.roundTripCostBps)} />
           <MarketCostMetrics label="做多腿" market={longMarket} />
           <MarketCostMetrics label="做空腿" market={shortMarket} />
@@ -95,7 +95,7 @@ export function ArbitrageOpportunityAnalysis({
 
       <section className="space-y-4" aria-labelledby="market-comparison-title">
         <SectionTitle id="market-comparison-title" title="两腿市场对比" description="只展示当前机会对应的做多和做空市场。" />
-        <MetricGrid>
+        <MetricGrid columns={2}>
           <MarketActivityMetrics label="做多腿" market={longMarket} />
           <MarketActivityMetrics label="做空腿" market={shortMarket} />
         </MetricGrid>
@@ -108,7 +108,7 @@ export function ArbitrageOpportunityAnalysis({
 
       <section className="space-y-4" aria-labelledby="comprehensive-analysis-title">
         <SectionTitle id="comprehensive-analysis-title" title="综合分析" description="综合质量结合历史表现、匹配、成本、流动性和数据状态。" />
-        <MetricGrid>
+        <MetricGrid columns={4}>
           <Metric label="综合质量" value={recommendationLabel(opportunity.recommendation)} />
           <Metric label="综合质量评分" value={`${opportunity.historicalQualityScore} 分`} />
           <Metric label="比较置信度" value={confidenceLabel(opportunity.confidence)} />
@@ -173,31 +173,45 @@ function LegSummary({ leg, side }: {
 function HistoricalFundingMetrics({ label, market }: { label: string; market: ArbitrageMarket | null }) {
   if (!market) return <Metric label={`${label}历史数据`} value="市场详情不可用" />;
   if (market.kind === "spot") return <Metric label={`${label}历史资金费率`} value="现货无资金费率" />;
-  return (
-    <Metric
-      label={`${label}历史资金费率`}
-      value={`${formatApr(market.historicalFundingApr, true)} · 正费率 ${formatRatio(market.fundingPositiveRatio)} · 覆盖 ${formatRatio(market.fundingCoverageRatio)}`}
-    />
-  );
+  return <MetricDetails title={`${label}历史资金费率`} rows={[
+    ["历史年化", formatApr(market.historicalFundingApr, true)],
+    ["正费率占比", formatRatio(market.fundingPositiveRatio)],
+    ["数据覆盖", formatRatio(market.fundingCoverageRatio)],
+  ]} />;
 }
 
 function MarketCostMetrics({ label, market }: { label: string; market: ArbitrageMarket | null }) {
   if (!market) return <Metric label={`${label}成本`} value="市场详情不可用" />;
-  return (
-    <Metric
-      label={`${label}成本`}
-      value={`吃单费 ${formatBps(market.takerFeeBps)} · 1 万美元滑点 ${formatBps(market.slippageBps10k)} · 10 万美元滑点 ${formatBps(market.slippageBps100k)}`}
-    />
-  );
+  return <MetricDetails title={`${label}成本`} rows={[
+    ["吃单费", formatBps(market.takerFeeBps)],
+    ["1 万美元滑点", formatBps(market.slippageBps10k)],
+    ["10 万美元滑点", formatBps(market.slippageBps100k)],
+  ]} />;
 }
 
 function MarketActivityMetrics({ label, market }: { label: string; market: ArbitrageMarket | null }) {
   if (!market) return <Metric label={`${label}市场活动`} value="市场详情不可用" />;
+  return <MetricDetails title={`${label}市场活动`} rows={[
+    ["点差", formatBps(market.spreadBps)],
+    ["深度", formatUsd(market.depthUsd)],
+    ["24小时成交额", formatUsd(market.volume24h)],
+    ["未平仓量", market.openInterest === null ? "-" : String(market.openInterest)],
+  ]} />;
+}
+
+function MetricDetails({ title, rows }: { title: string; rows: [string, string][] }) {
   return (
-    <Metric
-      label={`${label}市场活动`}
-      value={`点差 ${formatBps(market.spreadBps)} · 深度 ${formatUsd(market.depthUsd)} · 24小时成交额 ${formatUsd(market.volume24h)} · 未平仓量 ${market.openInterest === null ? "-" : String(market.openInterest)}`}
-    />
+    <div className="min-w-0 bg-black px-4 py-3">
+      <h3 className="mb-3 text-xs font-medium text-muted">{title}</h3>
+      <dl className="space-y-2">
+        {rows.map(([label, value]) => (
+          <div key={label} className="flex min-w-0 flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+            <dt className="text-xs text-muted">{label}</dt>
+            <dd className="min-w-0 break-words text-right font-mono text-sm font-medium tabular-nums text-white">{value}</dd>
+          </div>
+        ))}
+      </dl>
+    </div>
   );
 }
 
@@ -252,21 +266,23 @@ function OpportunityFactorRow({ factor }: { factor: OpportunityFactor }) {
 function SectionTitle({ description, id, title }: { description: string; id: string; title: string }) {
   return (
     <div className="flex flex-col gap-1 border-b border-line pb-3 sm:flex-row sm:items-end sm:justify-between sm:gap-4">
-      <h2 className="text-sm font-semibold text-white" id={id}>{title}</h2>
-      <p className="text-xs leading-5 text-muted">{description}</p>
+      <h2 className="shrink-0 text-sm font-semibold text-white" id={id}>{title}</h2>
+      <p className="max-w-prose text-xs leading-5 text-muted sm:text-right">{description}</p>
     </div>
   );
 }
 
-function MetricGrid({ children }: { children: import("react").ReactNode }) {
-  return <div className="grid gap-px border border-line bg-line sm:grid-cols-2 xl:grid-cols-3">{children}</div>;
+function MetricGrid({ children, columns }: { children: import("react").ReactNode; columns: 2 | 3 | 4 }) {
+  const layout = columns === 4 ? "sm:grid-cols-2 xl:grid-cols-4"
+    : columns === 3 ? "lg:grid-cols-3" : "sm:grid-cols-2";
+  return <div data-metric-columns={columns} className={`grid gap-px border border-line bg-line ${layout}`}>{children}</div>;
 }
 
 function Metric({ label, value }: { label: string; value: string }) {
   return (
     <div className="min-w-0 bg-black px-4 py-3">
-      <p className="text-[11px] text-dim">{label}</p>
-      <p className="mt-1 break-words font-mono text-sm font-semibold text-white">{value}</p>
+      <p className="text-xs text-muted">{label}</p>
+      <p className="mt-2 break-words font-mono text-sm font-semibold tabular-nums text-white">{value}</p>
     </div>
   );
 }
